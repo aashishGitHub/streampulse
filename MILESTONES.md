@@ -738,6 +738,282 @@ see the code it protects passes forever.
 So the gateway now states its own, including the one BS-09 made necessary: nothing in
 `..domain..` or `..application..` may depend on `io.grpc..` or `com.google.protobuf..`. A
 second protocol is exactly when a hexagon quietly collapses.
+- **Resilience4j `Retry` and `Bulkhead`** (REQ-RS-01, REQ-RS-05) — the circuit breaker and
+  time limiter are done; retry with exponential backoff + jitter is not. The in-flight
+  `Semaphore` is already a semaphore bulkhead in effect; whether to replace it with the
+  library's is a Phase 9 decision once there are measurements.
+- **gRPC adapter** — BS-09 / REQ-GR-01…07 not started.
+- ~~**Keycloak**~~ — closed below.
+- ~~**Actuator health groups**~~ — closed below.
+- **Breaker thresholds are guesses.** They are chosen to be explainable, not measured.
+  Phase 9 replaces them.
+
+---
+
+## Phase 2 (continued) — real OIDC, and probes that have been seen to move · 2026-09-29 · ✅
+
+Closing the last two items above. Both were the same kind of gap: something was
+**configured** and nothing had ever **observed it working**.
+
+### What landed
+
+**Real OIDC against Keycloak (REQ-IG-07/08/09, ADR-0011).** `KeycloakOidcIT` boots a real
+Keycloak via Testcontainers, importing the *same realm file* `make up-core` mounts. Keycloak
+is now in the `core` compose profile with `--import-realm`, so a fresh machine gets a working
+IdP with no admin-console clicking.
+
+**Health probes asserted (BS-01 / REQ-LC-01, REQ-LC-02).** `HealthProbesIT` needs no Docker
+at all and pins the drain behaviour that BS-01 exists for.
+
+### The thing worth understanding: what a symmetric test token can never prove
+
+`TestJwtSupport` mints HS256 tokens with a 32-byte constant and hands the app a matching
+`JwtDecoder`. That genuinely proves signature, expiry and the tenant claim — and it cannot
+prove issuer, audience or key rotation, not because the tests are weak but because **in that
+setup those things do not exist**:
+
+```
+  HS256   one shared secret   →  anyone who can VERIFY a token can also MINT one
+                              →  no asymmetry, no trust boundary, nothing for `iss` to protect
+                              →  and the test tokens carry no `aud` claim at all
+```
+
+A second thing the double was hiding: `application.yml` had **no** resource-server
+configuration whatsoever — no `issuer-uri`, no `audiences`. Every test passed because
+`TestJwtSupport` supplied the `JwtDecoder` bean. Started for real, the app would have failed
+at context refresh with no decoder to build the filter chain from. The test double was not
+just masking weak validation; it was masking the absence of any production configuration.
+
+### Verified — the Keycloak suite
+
+```
+$ ./gradlew :services:ingest-gateway:test --tests '*KeycloakOidcIT*'
+
+KeycloakOidcIT > the fixture itself > the realm imported, and its discovery document names the issuer Spring was given PASSED
+KeycloakOidcIT > a real Keycloak token > REQ-IG-09: RS256, verified against a key this service never held, and the tenant claim wins PASSED
+KeycloakOidcIT > a real Keycloak token > a key ROTATION is picked up with no restart, and tokens signed by the OLD key still verify PASSED
+KeycloakOidcIT > tokens that must NOT be accepted > a token from a DIFFERENT ISSUER is rejected with 401 — identical claims, foreign key PASSED
+KeycloakOidcIT > tokens that must NOT be accepted > a token with the WRONG AUDIENCE is rejected with 401 — same issuer, SAME signing key PASSED
+
+BUILD SUCCESSFUL in 24s
+```
+
+Twenty-four seconds, of which ~0.8s is assertions and the rest is Keycloak booting (148
+Liquibase changesets against H2). The first run on a cold machine also pays a ~450 MB pull.
+
+### Each negative differs in exactly ONE claim
+
+A test that rejects a token proves nothing unless you know *why*. Observed claim values, not
+assumed:
+
+| Case | `iss` | `kid` | `aud` | `tenant` |
+|---|---|---|---|---|
+| accepted | `…/realms/streampulse` | `QpUunJLwZdbL…` | `[streampulse-ingest, account]` | streamflix |
+| wrong audience | `…/realms/streampulse` | **`QpUunJLwZdbL…`** | **`[streampulse-analytics, account]`** | streamflix |
+| wrong issuer | **`…/realms/rogue-idp`** | **`dn_O5Tj5tSMb…`** | `[streampulse-ingest, account]` | streamflix |
+
+The audience case is the strong one: **same realm means the same signing key**, so the
+signature is genuinely valid and only `aud` can be responsible. The test asserts the `kid`
+equality before asserting the 401.
+
+The issuer case is honestly weaker and the comment says so: a foreign realm has its own
+keypair, so the signature check fails *first* and `JwtIssuerValidator` is the second line of
+defence rather than the one that fired. That ordering is correct — an unknown key should
+never reach claim validation.
+
+### Verified by mutation — the audience check
+
+```
+$ # delete `audiences` from application.yml and the test's DynamicPropertySource
+$ ./gradlew :services:ingest-gateway:test --tests '*KeycloakOidcIT*'
+
+KeycloakOidcIT > a token with the WRONG AUDIENCE is rejected — same issuer, SAME signing key FAILED
+    expected: 401 UNAUTHORIZED
+     but was: 202 ACCEPTED
+5 tests completed, 1 failed
+```
+
+**Four of the five still passed.** A read-only analytics-dashboard credential became a valid
+**write** credential for telemetry, and only the test written for that property noticed. Same
+lesson as ADR-0009's decorator ordering, on different material.
+
+### Verified — key rotation
+
+A second `rsa-generated` provider at priority 200 (Keycloak's default is 100) becomes the
+active signer. Observed directly against a live container before the test was written:
+
+```
+old kid: QpUunJLwZdbL1eeyoNQCpOO31XBdxT_wn4_RUYEge9s
+new kid: ATO39U2IVLlg58SFlY_1Ex85YcTBPMW4vtGBCJ6m0ZM
+jwks kids: ['ATO39U2IVLlg…', 'yebGopNonQEp…', 'QpUunJLwZdbL…']  count: 3
+```
+
+Both halves are asserted, and the second matters as much: the **old** key stays in the JWKS,
+so tokens already in flight keep verifying. A rotation that invalidated them would be an
+outage, not a rotation.
+
+That the re-fetch is immediate was verified against the jar rather than assumed —
+`spring-security-oauth2-jose` 6.5.1 builds its JWK source with `refreshAheadCache(false)` and
+`rateLimited(false)`, so an unknown `kid` forces a fetch on the next request. If it were rate
+limited this test would need polling, and saying so would be part of the result.
+
+### Verified — health probes, with no Docker at all
+
+```
+$ ./gradlew :services:ingest-gateway:test --tests '*HealthProbesIT*'
+
+HealthProbesIT > REQ-LC-01: a healthy pod answers both probes UP, and neither probe needs a token PASSED
+HealthProbesIT > the liveness group contains ONLY livenessState — a dependency in here is a restart storm PASSED
+HealthProbesIT > the readiness group contains ONLY readinessState, so the drain is what drives it PASSED
+HealthProbesIT > REQ-LC-01: readiness goes OUT_OF_SERVICE during the drain, and liveness stays UP PASSED
+
+BUILD SUCCESSFUL in 10s
+```
+
+### Verified by mutation — the drain
+
+Comment out the one line in `IngestDrainLifecycle.stop()`:
+
+```
+$ # // AvailabilityChangeEvent.publish(context, ReadinessState.REFUSING_TRAFFIC);
+HealthProbesIT > REQ-LC-01: readiness goes OUT_OF_SERVICE during the drain, and liveness stays UP FAILED
+    expected: 503 SERVICE_UNAVAILABLE
+     but was: 200 OK
+4 tests completed, 1 failed
+```
+
+Three of four still passed. Without that line a pod keeps reporting itself ready for the
+entire drain, so the load balancer keeps sending it work it has already decided to stop
+taking — which is the exact failure BS-01 exists to prevent, and it was previously invisible.
+
+### Verified by mutation — the liveness group, and a restart storm on camera
+
+The assertion that the liveness group contains *only* `livenessState` is an assertion about
+an **omission**, which is unusual enough to be worth proving is not vacuous. Adding Redis to
+it (`include: livenessState,redis`) with no Redis running:
+
+```
+HealthProbesIT > REQ-LC-01: a healthy pod answers both probes UP … FAILED
+     but was: 503 SERVICE_UNAVAILABLE
+HealthProbesIT > the liveness group contains ONLY livenessState … FAILED
+HealthProbesIT > REQ-LC-01: readiness goes OUT_OF_SERVICE during the drain … FAILED
+     but was: 503 SERVICE_UNAVAILABLE
+4 tests completed, 3 failed
+```
+
+**Liveness itself went 503** — which in Kubernetes means every pod gets restarted, simultaneously,
+because of a dependency the ingest path deliberately fails *open* on (ADR-0007). The classic
+outage amplifier, reproduced in ten seconds.
+
+### Verified — `make up-core`, end to end, with no test doubles anywhere
+
+```
+$ make up-core && make seed-aws
+NAME          IMAGE                            STATUS
+sp-keycloak   quay.io/keycloak/keycloak:26.0   Up 18 seconds (healthy)   0.0.0.0:8081->8080/tcp
+sp-moto       motoserver/moto:latest           Up 18 seconds (healthy)   0.0.0.0:5001->5000/tcp
+sp-postgres   postgres:16-alpine               Up 18 seconds (healthy)   0.0.0.0:5432->5432/tcp
+sp-redis      redis:7-alpine                   Up 18 seconds (healthy)   0.0.0.0:6379->6379/tcp
+created stream telemetry-raw-v1
+
+$ ./gradlew :services:ingest-gateway:bootRun        # real config, no @TestConfiguration
+
+1. ingest-gateway token      aud=[streampulse-ingest, account]
+   {"accepted":1,"duplicates":0,"batchId":"b883f2f9-…","degraded":false}   <- HTTP 202
+2. analytics-dashboard token aud=[streampulse-analytics, account]  (SAME signing key)
+   <- HTTP 401
+      error_description="An error occurred while attempting to decode the Jwt: The aud claim is not valid"
+3. no token
+   <- HTTP 401
+4. probes
+   liveness  : {"status":"UP","components":{"livenessState":{"status":"UP"}}}  [HTTP 200]
+   readiness : {"status":"UP","components":{"readinessState":{"status":"UP"}}}  [HTTP 200]
+```
+
+That 401's `error_description` is the best single line of evidence in this entry: the
+resource server naming `aud` as the reason, for a token it otherwise accepted completely.
+
+### Problems hit and resolved
+
+**1. Keycloak rejects unknown JSON properties, so `_comment` keys do not survive an import.**
+JSON has no comment syntax, and the realm file is exactly the kind of configuration that
+needs prose next to it. `_comment` arrays were tried first and Keycloak 26.0.8 refused to
+start:
+
+```
+ERROR: Failed to run import
+ERROR: Unrecognized field "_comment" (class org.keycloak.representations.idm.RealmRepresentation),
+       not marked as ignorable (144 known properties: …)
+```
+
+Worth an entry because the guess was plausible — plenty of tools ignore unknown keys — and
+because checking cost one container boot rather than a confusing CI failure later. The
+reasoning moved to ADR-0011 and to `KeycloakOidcIT`'s Javadoc, and the realm file leans on
+`description` fields, which Keycloak *does* accept.
+
+**2. Two realm files in the import directory: both import, then the server fails to start.**
+
+```
+INFO  Realm 'streampulse' imported
+INFO  Realm 'rogue-idp' imported
+ERROR: Failed to start server in (development) mode
+ERROR: Session not bound to a realm
+```
+
+One file works. **Root cause not established** — recorded as observed behaviour on Keycloak
+26.0.8, not as a diagnosis. Sidestepped rather than fought, and the workaround is better
+design anyway: only the real realm is imported at boot, and `KeycloakOidcIT` creates the
+adversary realm over the admin API. A test fixture in `docker/keycloak/realms/` would
+otherwise boot in every developer's local stack.
+
+**3. `bootRun` never had the moto CBOR workaround — pre-existing, found by actually running
+the app.** The `aws.cborEnabled=false` system property was set on `tasks.withType<Test>` only.
+So the tests had it and `bootRun` did not, and the first real request against `make up-core`
+answered:
+
+```
+KinesisException: Service returned HTTP status code 500
+  (Service: Kinesis, Status Code: 500, Request ID: null) (SDK Attempt Count: 4)
+```
+
+No mention of CBOR, of moto, or of a workaround that exists eight lines away in the same
+build file. `--args='--aws.cborEnabled=false'` does not help either, because it is a **system**
+property and not a Spring one — which looks like it should work and does not. Fixed by also
+applying it to `tasks.withType<JavaExec>()` (`bootRun` is a `JavaExec`).
+
+Unrelated to OIDC, and it would have stayed hidden indefinitely: the whole suite was green
+the entire time. Running the thing is a different test from testing the thing.
+
+### API names verified against the jars, not from memory
+
+Nothing in this change was written from recall:
+
+| Claim | How it was checked |
+|---|---|
+| `spring.security.oauth2.resourceserver.jwt.issuer-uri` / `.audiences` | `spring-configuration-metadata.json` inside `spring-boot-autoconfigure-3.5.3.jar` |
+| `issuer-uri` ⇒ `withIssuerLocation` + `createDefaultWithIssuer` | `javap -c` on `OAuth2ResourceServerJwtConfiguration$JwtDecoderConfiguration` |
+| `audiences` ⇒ `JwtClaimValidator("aud", …)` via `Collections.disjoint` | same bytecode |
+| JWKS refresh is **not** rate limited | `javap -c` on `NimbusJwtDecoder$JwkSetUriJwtDecoderBuilder` → `rateLimited(false)` |
+| `management.endpoint.health.group` | `spring-configuration-metadata.json` in `spring-boot-actuator-autoconfigure-3.5.3.jar` |
+| `REFUSING_TRAFFIC` ⇒ `Status.OUT_OF_SERVICE` | `javap -c` on `ReadinessStateHealthIndicator` |
+| `OUT_OF_SERVICE` ⇒ HTTP 503 | `javap -c` on `SimpleHttpCodeStatusMapper` static initialiser |
+| Keycloak mapper ids, claim shapes, rotation | run against a live container and the tokens dumped |
+
+### Why a plain GenericContainer rather than dasniko/testcontainers-keycloak
+
+Checked before deciding: the module is real and actively maintained (Keycloak 26.7, Java 11+),
+and its README states "no LTS, no backports — stay up to date."
+
+Not adopted, for reasons recorded in ADR-0011. The decisive one is a resolution surprise found
+while looking: this build does **not** get Testcontainers from the version catalog. The
+catalog says `testcontainers = "1.21.3"`; the resolved jar is **1.21.2**, because
+`io.spring.dependency-management` applies the Boot BOM with Maven-style precedence that
+overrides Gradle's. Adding a library with its own opinion about that version puts a third
+party into an already surprising resolution, for twenty saved lines.
+
+> Follow-up worth doing: the catalog comment implies 1.21.3 is what runs, and it is not.
+> Either drop the pin or add `enforcedPlatform`. Left alone here rather than changed in a
+> commit about OIDC.
 
 ### Full suite
 
@@ -778,3 +1054,47 @@ BUILD SUCCESSFUL in 24s
 - **Keycloak** still absent. The gRPC interceptor shares the symmetric-key test decoder with
   REST, which proves the decoder and the tenant rule are shared. It does **not** prove JWKS
   rotation, issuer or audience validation on either protocol.
+$ ./gradlew clean build
+BUILD SUCCESSFUL in 40s
+
+  libs/contracts             tests= 28 failures=0 errors=0 skipped=0
+  libs/platform              tests= 39 failures=0 errors=0 skipped=0
+  services/ingest-gateway    tests= 49 failures=0 errors=0 skipped=0
+  TOTAL                      tests=116 failures=0 errors=0 skipped=0
+```
+
+`services/ingest-gateway` 40 → **49**: five Keycloak tests and four probe tests.
+
+The total reads lower than the 132 in the previous entry because that count still included
+the `kata` module's 25 tests. `kata` is no longer in `settings.gradle.kts` (removed in Phase
+0's scope change) and its stale results were being counted. 107 → 116 is the real delta.
+
+**The fast suite stayed fast.** Only one of the nine new tests needs Keycloak's container, and
+the four probe tests need no Docker at all:
+
+```
+  HealthProbesIT                  4 tests     5.2s      no containers
+  IngestEndToEndIT               13 tests     4.0s      moto + redis  (unchanged)
+  KeycloakOidcIT                  5 tests     0.8s      + ~23s Keycloak boot
+```
+
+`IngestEndToEndIT` and its symmetric-key tokens are untouched and still passing. They were
+never the problem; believing they covered issuer and audience was.
+
+### Still outstanding in Phase 2
+
+- **Resilience4j `Retry` and `Bulkhead`** (REQ-RS-01, REQ-RS-05) — unchanged.
+- **gRPC adapter** — BS-09 / REQ-GR-01…07 not started.
+- **Breaker thresholds are guesses.** Phase 9 replaces them.
+- **Authorization, as distinct from authentication.** The token now proves who the caller is
+  and which API it was minted for. Nothing yet restricts what it may *do* within ingest —
+  scopes and roles are untouched.
+- **The realm is not a model of production identity.** `tenant` is a hardcoded mapper, client
+  secrets are in git (local-only placeholders, same category as the Postgres password), and
+  `sslRequired: none`. Phase 11.
+- **The drain test calls `stop()` directly; no test sends a real SIGTERM.** It proves the
+  readiness flip and the liveness non-flip, not the full `SmartLifecycle` phase ordering
+  under an actual signal. `RollingRestartChaosIT` (BS-01's acceptance test) is still Phase 11.
+- **`docker/keycloak/realms/` is imported, never exported.** A change made in the admin
+  console is lost on `make nuke` and silently diverges until then. A `make export-realm`
+  target would close that loop.

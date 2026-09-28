@@ -118,7 +118,16 @@ services:
   # -------------------------------------------------------------------------
   # KEYCLOAK — real OIDC provider issuing real JWTs. Chosen over a mock so the
   # JWT validation path is genuinely exercised (and it is the Java-ecosystem
-  # standard, so it is a transferable skill).
+  # standard, so it is a transferable skill). ADR-0011.
+  #
+  # The realm is IMPORTED rather than clicked together in the admin console, so
+  # a fresh machine gets a working IdP from `make up-core` with no manual step —
+  # and so KeycloakOidcIT can boot the SAME realm file from the test classpath.
+  # An IdP whose configuration lives only in someone's browser history is an IdP
+  # nobody else can reproduce.
+  #
+  # Same tag as the one KeycloakOidcIT pins. If these drift, the test starts
+  # proving something about a Keycloak nobody runs.
   # -------------------------------------------------------------------------
   keycloak:
     image: quay.io/keycloak/keycloak:26.0
@@ -130,7 +139,26 @@ services:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: admin
       KC_HEALTH_ENABLED: "true"
-    command: ["start-dev"]
+    volumes:
+      # Keycloak imports every *.json in this directory on boot. Read-only: a
+      # container that can rewrite its own source of truth makes "what realm is
+      # actually running?" unanswerable.
+      - ./keycloak/realms:/opt/keycloak/data/import:ro
+    command: ["start-dev", "--import-realm"]
+    healthcheck:
+      # NOT /health — Keycloak 26 serves the management endpoints on port 9000,
+      # not 8080. The realm's own discovery document is a better probe anyway:
+      # it returns 200 only once the IMPORT has finished, which is the thing a
+      # dependent service actually needs.
+      test:
+        [
+          "CMD-SHELL",
+          "exec 3<>/dev/tcp/localhost/8080 && echo -e 'GET /realms/streampulse/.well-known/openid-configuration HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '200 OK' <&3",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
 
   # -------------------------------------------------------------------------
   # DYNAMODB LOCAL — AWS's own emulator, so fidelity is high.

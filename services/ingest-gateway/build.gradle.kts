@@ -59,6 +59,27 @@ dependencies {
 }
 
 // ---------------------------------------------------------------------------
+// The Keycloak realm that `make up-core` boots is ALSO on the test classpath, so
+// KeycloakOidcIT imports the identical file rather than a copy of it.
+//
+// A copy would drift, and the drift is invisible: the test would keep passing
+// against a realm nobody runs, which is the failure mode the test exists to
+// prevent. One file, two consumers — compose mounts the directory, this puts it
+// on the classpath, and MountableFile.forClasspathResource finds it at
+// "realms/streampulse-realm.json".
+//
+// The adversary realm deliberately does NOT live here: it is in src/test/
+// resources, so it can never be imported into a developer's local stack.
+// ---------------------------------------------------------------------------
+sourceSets {
+    test {
+        resources {
+            srcDir(rootProject.layout.projectDirectory.dir("docker/keycloak"))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Kinesis speaks CBOR (a binary JSON encoding) by default in the AWS SDKs. moto
 // does not implement it, and the failure is deeply unhelpful: HTTP 500 with no
 // message, after the SDK has silently retried four times.
@@ -68,7 +89,23 @@ dependencies {
 //
 // VERIFY: if moto gains CBOR support, or the SDK changes the property name,
 // this can be removed. Check before assuming it is still needed.
+//
+// Applied to JavaExec as well as Test, because `bootRun` is a JavaExec and it
+// talks to the SAME moto. Without it, `make up-core && ./gradlew bootRun` accepts
+// a request, retries four times and answers 500 — and the message names neither
+// CBOR nor moto:
+//
+//   KinesisException: Service returned HTTP status code 500
+//     (Service: Kinesis, Status Code: 500, Request ID: null) (SDK Attempt Count: 4)
+//
+// It is a SYSTEM property, not a Spring one, so `--args=--aws.cborEnabled=false`
+// does not help and looks like it should. Worth knowing before losing an hour to
+// it: the tests passed the whole time, because only they had the flag.
 // ---------------------------------------------------------------------------
 tasks.withType<Test>().configureEach {
+    systemProperty("aws.cborEnabled", "false")
+}
+
+tasks.withType<JavaExec>().configureEach {
     systemProperty("aws.cborEnabled", "false")
 }

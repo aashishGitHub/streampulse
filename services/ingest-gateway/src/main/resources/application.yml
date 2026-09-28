@@ -22,6 +22,37 @@ spring:
     # Kubernetes terminationGracePeriodSeconds must exceed the TOTAL across phases.
     timeout-per-shutdown-phase: 25s
 
+  # -------------------------------------------------------------------------
+  # OAuth2 resource server (REQ-IG-07/08/09, ADR-0011).
+  #
+  # `issuer-uri` is doing four jobs at once, which is why it is one line and not
+  # four. Spring Boot turns it into NimbusJwtDecoder.withIssuerLocation(...), so:
+  #
+  #   1. the OIDC discovery document is fetched from <issuer>/.well-known/…
+  #   2. the JWKS url is read from it, and the RS256 PUBLIC key is fetched from
+  #      the issuer — this service holds no key material at all
+  #   3. an unknown `kid` triggers a re-fetch, so a key rotation needs no restart
+  #   4. a JwtIssuerValidator is installed, so a token minted by some OTHER
+  #      provider is refused even if its signature were somehow acceptable
+  #
+  # `audiences` adds the check that issuer alone cannot make. One realm has one
+  # signing key, so every client of this Keycloak produces signatures we trust.
+  # `aud` is what says the token was minted FOR ingest — without it, a leaked
+  # analytics-dashboard token is a valid write credential for telemetry.
+  #
+  # Both are asserted end to end, against a real Keycloak, by KeycloakOidcIT.
+  #
+  # The default points at `make up-core`'s Keycloak (compose maps it to 8081).
+  # In a real deployment both come from the environment.
+  # -------------------------------------------------------------------------
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${OIDC_ISSUER_URI:http://localhost:8081/realms/streampulse}
+          audiences:
+            - ${OIDC_AUDIENCE:streampulse-ingest}
+
   data:
     redis:
       host: ${REDIS_HOST:localhost}
@@ -79,8 +110,38 @@ management:
   endpoint:
     health:
       probes:
-        enabled: true
+        enabled: true                 # registers the two groups below and the
+                                      # livenessState/readinessState indicators
       show-details: always            # local only; production would be when-authorized
+      group:
+        # Spring Boot would derive both groups from `probes.enabled` alone. They
+        # are written out because the MEMBERSHIP is the decision, and a decision
+        # that only exists as a framework default is one nobody reviews.
+        #
+        # HealthProbesIT asserts the shape below, including the part that is an
+        # omission rather than an entry.
+        liveness:
+          # livenessState ONLY. Never a dependency.
+          #
+          # Liveness answers "am I broken beyond recovery?", and the only cure
+          # Kubernetes has for a failed liveness probe is a restart. Put Redis in
+          # here and a Redis blip restarts every pod simultaneously — a cold JVM
+          # and a cold cache on top of the original incident. Ingest explicitly
+          # fails OPEN when Redis is unreachable (ADR-0007), so a Redis outage is
+          # not even a reason to stop serving, let alone to restart.
+          include: livenessState
+        readiness:
+          # readinessState ONLY, for now.
+          #
+          # This is the group IngestDrainLifecycle flips: publishing
+          # REFUSING_TRAFFIC turns it OUT_OF_SERVICE, the endpoint returns 503,
+          # and Kubernetes removes the pod from the Service before anything stops
+          # working (BS-01 / REQ-LC-01).
+          #
+          # A dependency belongs here only if a request genuinely cannot be
+          # served without it — Kinesis would qualify, Redis does not. Phase 9
+          # revisits it with measurements rather than opinions.
+          include: readinessState
   health:
     livenessstate:
       enabled: true

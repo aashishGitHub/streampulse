@@ -35,12 +35,18 @@ import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
  * tenant claim fails closed; that the tenant is taken from the token and not the body;
  * that an expired token is refused.
  *
- * <b>Does not prove:</b> that Keycloak's JWKS rotation, issuer validation or audience
- * checks are configured correctly. Those need the real issuer, and Phase 11 covers them
- * with Keycloak in the compose stack.
+ * <b>Does not prove:</b> JWKS rotation, {@code iss} validation or {@code aud} validation.
+ * Not because these tests are thin, but because in this setup <b>those things do not
+ * exist</b>: the decoder is given no issuer to compare against, and the tokens below carry
+ * no {@code aud} claim at all. {@code KeycloakOidcIT} covers all three against a real
+ * issuer, and ADR-0011 explains why that had to be a separate suite.
  *
- * <p>HS256 here is a <b>test</b> choice. Never use a shared secret for a real resource
- * server: every service that can verify a token can also mint one.
+ * <p>HS256 here is a <b>test</b> choice, and the reason is the same one: with a shared
+ * secret, every party that can verify a token can also mint one. No asymmetry means no
+ * trust boundary — which is fine for a fixture and disqualifying for a resource server.
+ *
+ * <p>This class stays because it is <b>fast</b>: the thirteen tests in
+ * {@code IngestEndToEndIT} need no identity provider, and that is worth keeping.
  */
 @TestConfiguration
 public class TestJwtSupport {
