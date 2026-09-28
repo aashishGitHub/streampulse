@@ -129,6 +129,21 @@ streampulse:
                                       # At-least-once with duplicates beats losing
                                       # telemetry. Deliberate trade; see ADR-0007.
 
+    # Circuit breaker + timeout around the publisher (REQ-IG-21 / REQ-RS-02, REQ-RS-06).
+    # Starting points chosen to be explainable, not measured — Phase 9 replaces them.
+    publisher-resilience:
+      sliding-window-size: 20            # decide on the last 20 calls
+      minimum-number-of-calls: 10        # ...but never on fewer than 10, so two unlucky
+                                         # calls at 04:00 cannot open the breaker
+      failure-rate-threshold: 50         # percent failed that opens it
+      slow-call-rate-threshold: 50       # percent SLOW that opens it, even if all succeed
+      slow-call-duration-threshold: 2s   # above this a SUCCESS still counts as slow
+      wait-duration-in-open-state: 30s   # refuse everything this long, then probe
+      permitted-calls-in-half-open-state: 5
+      call-timeout: 5s                   # hard ceiling; must exceed slow-call threshold,
+                                         # or every slow call becomes a timeout and the
+                                         # slow-call signal never fires
+
 logging:
   level:
     com.streampulse: DEBUG

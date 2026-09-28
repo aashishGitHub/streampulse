@@ -396,5 +396,60 @@ class IngestServiceTest {
 
             assertThat(metrics.publishFailures.get()).isEqualTo(1);
         }
+
+        @Test
+        @DisplayName("REQ-IG-22: a failed publish leaves no claim behind, so the retry works")
+        void aFailedPublishCanBeRetried() {
+            IngestService service = service();
+            IngestCommand batch = batchOf(3);
+
+            // 1. The broker is down. The client is told, and still holds its events.
+            publisher.failWith = new IllegalStateException("kinesis unavailable");
+            assertThatThrownBy(() -> service.ingest(batch)).isInstanceOf(IllegalStateException.class);
+            assertThat(publisher.published).isEmpty();
+
+            // 2. The broker recovers and the client retries the SAME batch -- exactly what a
+            //    well-behaved client does, and what our own Retry-After tells it to do.
+            publisher.failWith = null;
+            IngestResult retry = service.ingest(batch);
+
+            // 3. All three events must reach the broker.
+            //
+            //    This is where telemetry disappears if step 1 left its claims behind:
+            //    claimAll() reports all three as already-seen, the service returns 202 having
+            //    published nothing, and the client drops its copy. A silent, permanent hole
+            //    in the data, reported to the caller as success.
+            //
+            //    The claim is a RESERVATION, and a reservation that is never used has to be
+            //    given back. Publishing failed, so the work was not done.
+            assertThat(retry.published()).isEqualTo(3);
+            assertThat(publisher.published).hasSize(3);
+        }
+
+        @Test
+        @DisplayName("without the release, that retry is silently swallowed -- the bug being guarded")
+        void withoutTheReleaseTheRetryIsSwallowed() {
+            // Executable documentation of the failure mode, so nobody deletes release() as
+            // "defensive code that never fires". releaseFails models exactly the pre-fix
+            // behaviour: the claim is taken and never given back.
+            store.releaseFails = true;
+
+            IngestService service = service();
+            IngestCommand batch = batchOf(3);
+
+            publisher.failWith = new IllegalStateException("kinesis unavailable");
+            assertThatThrownBy(() -> service.ingest(batch)).isInstanceOf(IllegalStateException.class);
+
+            publisher.failWith = null;
+            IngestResult retry = service.ingest(batch);
+
+            // Here is the damage: HTTP 202, zero events published, nothing thrown, no metric
+            // moved that says "loss". The client sees success and drops its copy.
+            //
+            // A reservation that is never released is indistinguishable from work completed.
+            assertThat(retry.published()).isZero();
+            assertThat(publisher.published).isEmpty();
+            assertThat(retry.duplicates()).isEqualTo(3);
+        }
     }
 }

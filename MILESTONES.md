@@ -334,7 +334,7 @@ That asserts the quota check runs **before** acquiring a permit. If it ran after
 tenant would consume capacity that healthy tenants need — turning their problem into
 everyone's.
 
-### NOT verified — Docker Desktop became unresponsive
+### NOT verified at the time — and the diagnosis below was WRONG. See the correction that follows.
 
 The security integration tests are **written but unrun**. Mid-session the Docker daemon
 stopped responding:
@@ -363,14 +363,155 @@ The most important of the eight is `bodyCannotOverrideTheTenant`: a caller authe
 `streamflix` sends a body also claiming `tenantId: sportsnow`, and the record must still be
 written as `streamflix`.
 
+---
+
+## Phase 2 (continued) — the correction, the breaker, and a data-loss bug
+
+### CORRECTION: Docker Desktop was never broken
+
+The entry above blamed an unresponsive daemon. **That was wrong**, and the wrong diagnosis
+cost the rest of that session.
+
+What was actually true: `docker info` responded fine (29.5.3). The build was pointing
+Testcontainers at a **dead socket**.
+
+The convention plugin pinned `DOCKER_HOST` to
+`~/Library/Containers/com.docker.docker/Data/docker.raw.sock`, which had been the live
+engine socket when that code was written. After a Docker Desktop upgrade it still exists
+and still accepts `connect()` — and then never replies. Verified:
+
+```
+$ docker context ls
+desktop-linux *   Docker Desktop   unix:///Users/…/.docker/run/docker.sock   ← the live one
+
+$ curl -s --max-time 8 --unix-socket ~/.docker/run/docker.sock localhost/v1.44/version
+{"Version":"29.5.3","ApiVersion":"1.54","MinAPIVersion":"1.40", …}          ✅ instant
+
+$ curl -s --max-time 8 --unix-socket ~/Library/…/Data/docker.raw.sock localhost/v1.44/version
+                                                                             ❌ hangs, no output
+```
+
+**The lesson worth keeping: a unix socket existing does not mean it answers.** The check
+was `if (socket.exists())`, and a dead socket passes it. The failure mode is silence — no
+error, no containers, no timeout — which looks exactly like a broken daemon and is not one.
+That resemblance is what made the wrong diagnosis so easy, twice.
+
+The fix orders the candidates by what Docker Desktop actually serves today
+(`~/.docker/run/docker.sock` first, the historical path last) and records the curl probe in
+the comment so the next person re-checks in ten seconds instead of losing an afternoon.
+The comment already carried a `VERIFY: …may change between versions` note. It was right.
+
+### Verified — the security integration tests, at last
+
+```
+$ ./gradlew :services:ingest-gateway:test --tests '*IngestEndToEndIT*'
+
+IngestEndToEndIT > no token is rejected with 401                              PASSED
+IngestEndToEndIT > a garbage token is rejected with 401                       PASSED
+IngestEndToEndIT > an EXPIRED token is rejected — expiry is actually checked  PASSED
+IngestEndToEndIT > a valid token with NO tenant claim fails closed            PASSED
+IngestEndToEndIT > a malformed tenant claim is rejected before anything is published  PASSED
+IngestEndToEndIT > the BODY cannot override the tenant — the token wins       PASSED
+… 13 tests
+
+BUILD SUCCESSFUL in 19s
+```
+
+Nineteen seconds, against twenty minutes of hanging. Same tests, same machine, one socket
+path.
+
+### A data-loss bug the circuit breaker work uncovered
+
+Adding a breaker meant asking what happens to a batch that fails to publish. The answer was
+worse than expected.
+
+`IngestService` claims event ids in Redis (`SET NX EX`) **before** publishing. If the
+publish then failed, the claims stayed behind. The client's retry found every id already
+claimed, received `202 Accepted` with zero events published, and dropped its copy.
+
+Silent, permanent data loss — reported to the caller as success. No metric moves, no alert
+fires. A breaker makes it strictly worse: it fails fast for its whole 30-second open
+window, so *every* batch in that window would be swallowed instead of the occasional one.
+
+Fixed with `IdempotencyStore.release(...)` as a compensating action. A claim is a
+**reservation**, and a reservation that is never used has to be given back.
+
+Both directions are pinned by tests, so nobody deletes `release()` later as defensive code
+that never fires:
+
+```
+IngestServiceTest > publish failures
+  > REQ-IG-22: a failed publish leaves no claim behind, so the retry works       PASSED
+  > without the release, that retry is silently swallowed -- the bug being guarded PASSED
+```
+
+The second test drives the fake store's `releaseFails` flag, which reproduces the pre-fix
+behaviour exactly. It asserts the damage: `published == 0`, `duplicates == 3`, no exception.
+
+### Verified — circuit breaker and time limiter (REQ-IG-21, REQ-RS-02, REQ-RS-06)
+
+`ResilientEventPublisher` decorates any `EventPublisher` with
+`CircuitBreaker ( TimeLimiter ( publish ) )`. Ten tests drive the full state machine.
+
+**The ordering was verified by mutation, not by assertion.** Swapping the two decorator
+lines and re-running:
+
+```
+THE ORDERING PROOF: a hanging broker times out, and the breaker counts it FAILED
+    expected: OPEN
+     but was: CLOSED
+```
+
+**Nine of the ten tests still passed with the wrong order.** Only the test written for that
+specific property caught it. With the breaker inside the time limiter, a permanently
+hanging dependency never trips it — which is the failure mode that matters most, because
+with virtual threads there is no pool to exhaust and no thread-count alarm to trip, just a
+growing pile of blocked threads each holding an in-flight permit.
+
+This is the clearest demonstration so far of `interview-qa/14-testing.md` Q8: a passing
+test suite proves the code passes the tests. Mutating the code is how you find out whether
+the tests would have noticed.
+
+### API names verified against the jars, not from memory
+
+Every Resilience4j signature was checked with `javap` against the 2.3.0 jars in the Gradle
+cache before being used. One was wrong:
+
+```
+❌  circuitBreaker.getCircuitBreakerConfig().getWaitDurationInOpenState()   does not exist
+✅  circuitBreaker.getCircuitBreakerConfig().getWaitIntervalFunctionInOpenState().apply(1)
+```
+
+Resilience4j models the open-state wait as an `IntervalFunction` (attempt → millis), because
+it also supports a wait that grows on each reopen. For a fixed wait, attempt 1 is the
+configured value. Worth the two minutes: it would otherwise have been a compile error at
+best, and a plausible-looking wrong answer in an interview at worst.
+
+### Full suite
+
+```
+$ ./gradlew build
+BUILD SUCCESSFUL in 14s
+
+  kata                      tests= 25 failures=0 errors=0 skipped=0
+  libs/contracts            tests= 28 failures=0 errors=0 skipped=0
+  libs/platform             tests= 39 failures=0 errors=0 skipped=0
+  services/ingest-gateway   tests= 40 failures=0 errors=0 skipped=0
+  TOTAL                     tests=132 failures=0 errors=0 skipped=0
+```
+
 ### Still outstanding in Phase 2
 
 Honest scope:
 
-- **Resilience4j** — the dependency is declared but no circuit breaker or time limiter is
-  applied to the publisher yet (REQ-IG-21).
+- **Resilience4j `Retry` and `Bulkhead`** (REQ-RS-01, REQ-RS-05) — the circuit breaker and
+  time limiter are done; retry with exponential backoff + jitter is not. The in-flight
+  `Semaphore` is already a semaphore bulkhead in effect; whether to replace it with the
+  library's is a Phase 9 decision once there are measurements.
 - **gRPC adapter** — BS-09 / REQ-GR-01…07 not started.
 - **Keycloak** — tests use a symmetric-key `JwtDecoder` under a test profile. That proves
   expiry, signature and the tenant claim are checked; it does **not** prove Keycloak's JWKS
   rotation, issuer or audience validation. Those need the real issuer.
 - **Actuator health groups** — configured in `application.yml`, never asserted by a test.
+- **Breaker thresholds are guesses.** They are chosen to be explainable, not measured.
+  Phase 9 replaces them.

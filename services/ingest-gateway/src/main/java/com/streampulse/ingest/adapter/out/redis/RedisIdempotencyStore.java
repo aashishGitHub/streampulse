@@ -97,4 +97,38 @@ public class RedisIdempotencyStore implements IdempotencyStore {
             return ClaimResult.unavailable();
         }
     }
+
+    @Override
+    public void release(TenantId tenant, List<EventId> eventIds) {
+        if (eventIds.isEmpty()) {
+            return;
+        }
+        try {
+            // DELETE, not "set to expired". Removing the key is what makes the id claimable
+            // again by the retry, which is the whole point.
+            //
+            // One round trip for the batch rather than one per id: this runs on the failure
+            // path, which is exactly when the system is already under strain and least able
+            // to afford N round trips.
+            List<String> keys =
+                    eventIds.stream().map(id -> id.idempotencyKey(tenant)).toList();
+            redis.delete(keys);
+
+        } catch (DataAccessException e) {
+            // Swallowed on purpose. The caller is ALREADY throwing a publish failure; letting
+            // this one escape would replace a precise error ("the broker rejected the batch")
+            // with a misleading one ("Redis is down"), and the operator would debug the wrong
+            // system.
+            //
+            // The cost of a failed release is bounded: those ids stay claimed until the TTL
+            // expires, so that one retry is lost. Recorded at WARN so it is visible if it
+            // ever becomes common rather than rare.
+            log.warn(
+                    "Could not release {} idempotency claims for tenant {}; a retry of these "
+                            + "events will be treated as a duplicate until the TTL expires: {}",
+                    eventIds.size(),
+                    tenant.value(),
+                    e.getMessage());
+        }
+    }
 }

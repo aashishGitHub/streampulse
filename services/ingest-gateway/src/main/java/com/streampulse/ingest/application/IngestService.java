@@ -7,6 +7,7 @@ import com.streampulse.ingest.domain.EventPublisher;
 import com.streampulse.ingest.domain.IdempotencyStore;
 import com.streampulse.ingest.domain.IngestCommand;
 import com.streampulse.ingest.domain.IngestResult;
+import com.streampulse.ingest.domain.PublishUnavailableException;
 import com.streampulse.ingest.domain.QuotaExceededException;
 import com.streampulse.ingest.domain.RateLimiter;
 import com.streampulse.platform.domain.EventId;
@@ -40,6 +41,8 @@ import java.util.concurrent.TimeUnit;
  *     │
  *     ├─ 3. PUBLISH the new ones ────────► wait for the broker ack. 202 must not be
  *     │                                     returned before the data is durable.
+ *     │                                     failed? → RELEASE the claims, then rethrow,
+ *     │                                     so the client's retry is not read as a duplicate
  *     │
  *     └─ 4. RELEASE the permit (finally)
  * </pre>
@@ -165,7 +168,22 @@ public class IngestService implements IngestUseCase {
                 .filter(e -> toPublish.contains(e.eventId()))
                 .toList();
 
-        publishAndWait(command, newEvents);
+        try {
+            publishAndWait(command, newEvents);
+        } catch (RuntimeException e) {
+            // COMPENSATING ACTION. These ids were claimed a few lines above but never made it
+            // to the broker, so the reservation has to be given back.
+            //
+            // Without this the client's retry finds every id already claimed, gets a 202 with
+            // nothing published, drops its copy, and the events are gone for good -- reported
+            // as success. The circuit breaker makes it strictly worse: it fails fast for its
+            // entire open window, so EVERY batch in those 30 seconds would be swallowed.
+            //
+            // release() is best-effort and never throws, so the caller still sees the real
+            // publish failure rather than a secondary one from Redis. See IdempotencyStore.
+            idempotencyStore.release(command.tenantId(), claim.claimed());
+            throw e;
+        }
 
         metrics.recordPublished(newEvents.size());
         metrics.recordDuplicates(claim.alreadySeen().size());
@@ -189,6 +207,14 @@ public class IngestService implements IngestUseCase {
             // makes every stack trace one level less useful.
             Throwable cause = e.getCause() != null ? e.getCause() : e;
             metrics.recordPublishFailure();
+
+            // "Come back later" passes through untouched. Wrapping it would turn a 503 with
+            // a Retry-After the client can act on into an opaque 500 it cannot -- and the
+            // difference decides whether that telemetry is retried or dropped.
+            if (cause instanceof PublishUnavailableException unavailable) {
+                throw unavailable;
+            }
+
             throw new IllegalStateException("failed to publish batch to the event stream", cause);
         }
     }

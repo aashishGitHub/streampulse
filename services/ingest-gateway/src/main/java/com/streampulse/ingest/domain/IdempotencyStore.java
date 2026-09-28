@@ -37,6 +37,34 @@ public interface IdempotencyStore {
     ClaimResult claimAll(TenantId tenant, List<EventId> eventIds);
 
     /**
+     * Gives back claims for events that were never published.
+     *
+     * <h2>Why this exists</h2>
+     *
+     * A claim is a <b>reservation</b>, not a record of completion. {@link #claimAll} runs
+     * <em>before</em> the publish, so a batch that fails to publish leaves reservations for
+     * events that never arrived anywhere. The client retries, every id comes back as
+     * already-seen, and the service answers {@code 202} having published nothing.
+     *
+     * <p>That is silent, permanent data loss reported as success — the worst failure mode a
+     * pipeline can have, because no metric moves and no alert fires.
+     *
+     * <h2>The duplicate it can cause, and why that is the right trade</h2>
+     *
+     * If the publish actually succeeded but we could not observe it (a timeout that fired
+     * while the write was landing), releasing lets a retry publish the event twice.
+     *
+     * <p>That is the same trade as failing open, made in the same direction on purpose:
+     * duplicates are absorbed downstream by idempotent aggregation, a gap is unrecoverable.
+     * ADR-0007.
+     *
+     * <p>Best-effort by contract: implementations must not throw. A failed release costs a
+     * possible lost retry, and throwing here would replace the original publish failure with
+     * a less useful one.
+     */
+    void release(TenantId tenant, List<EventId> eventIds);
+
+    /**
      * @param claimed ids that were not seen before — these must be published
      * @param alreadySeen ids that were already claimed — these are duplicates
      * @param storeAvailable false when the store could not be reached; the other fields are

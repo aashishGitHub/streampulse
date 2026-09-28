@@ -7,6 +7,7 @@ import com.streampulse.ingest.adapter.out.kafka.KafkaEventPublisher;
 import com.streampulse.ingest.adapter.out.kinesis.KinesisEventPublisher;
 import com.streampulse.ingest.adapter.out.redis.RedisIdempotencyStore;
 import com.streampulse.ingest.adapter.out.redis.RedisTokenBucketRateLimiter;
+import com.streampulse.ingest.adapter.out.resilience.ResilientEventPublisher;
 import com.streampulse.ingest.application.IngestMetrics;
 import com.streampulse.ingest.application.IngestService;
 import com.streampulse.ingest.application.IngestUseCase;
@@ -14,7 +15,17 @@ import com.streampulse.ingest.domain.EventPublisher;
 import com.streampulse.ingest.domain.IdempotencyStore;
 import com.streampulse.ingest.domain.RateLimiter;
 import com.streampulse.ingest.lifecycle.IngestDrainLifecycle;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
+import io.github.resilience4j.timelimiter.TimeLimiter;
+import io.github.resilience4j.timelimiter.TimeLimiterConfig;
+import io.github.resilience4j.timelimiter.TimeLimiterRegistry;
 import io.micrometer.core.instrument.MeterRegistry;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -46,6 +57,11 @@ import software.amazon.awssdk.services.kinesis.KinesisAsyncClient;
 @Configuration
 class IngestConfig {
 
+    private static final Logger log = LoggerFactory.getLogger(IngestConfig.class);
+
+    /** One name, used for the breaker, the limiter and therefore the metric tags. */
+    private static final String PUBLISHER = "eventPublisher";
+
     @Bean
     AvroEventMapper avroEventMapper() {
         return new AvroEventMapper();
@@ -68,15 +84,119 @@ class IngestConfig {
 
     @Bean
     @Profile("!kafka")
-    EventPublisher kinesisEventPublisher(KinesisAsyncClient kinesis, AwsProperties aws, AvroEventMapper mapper) {
-        return new KinesisEventPublisher(kinesis, aws.kinesisStreamName(), mapper);
+    EventPublisher kinesisEventPublisher(
+            KinesisAsyncClient kinesis,
+            AwsProperties aws,
+            AvroEventMapper mapper,
+            CircuitBreaker breaker,
+            TimeLimiter timeLimiter,
+            ScheduledExecutorService publishTimeoutScheduler) {
+        return new ResilientEventPublisher(
+                new KinesisEventPublisher(kinesis, aws.kinesisStreamName(), mapper),
+                breaker,
+                timeLimiter,
+                publishTimeoutScheduler);
     }
 
     @Bean
     @Profile("kafka")
     EventPublisher kafkaEventPublisher(
-            KafkaTemplate<String, byte[]> kafkaTemplate, IngestProperties props, AvroEventMapper mapper) {
-        return new KafkaEventPublisher(kafkaTemplate, props.rawTopic(), mapper);
+            KafkaTemplate<String, byte[]> kafkaTemplate,
+            IngestProperties props,
+            AvroEventMapper mapper,
+            CircuitBreaker breaker,
+            TimeLimiter timeLimiter,
+            ScheduledExecutorService publishTimeoutScheduler) {
+        return new ResilientEventPublisher(
+                new KafkaEventPublisher(kafkaTemplate, props.rawTopic(), mapper),
+                breaker,
+                timeLimiter,
+                publishTimeoutScheduler);
+    }
+
+    // -----------------------------------------------------------------------
+    // RESILIENCE (REQ-IG-21, REQ-RS-02, REQ-RS-06).
+    //
+    // The decorator is constructed INSIDE each publisher bean rather than as a
+    // separate @Primary bean taking an EventPublisher. That would be two beans of
+    // the same type where the outer one needs the inner: Spring would offer the
+    // decorator itself as a candidate for its own delegate. Wrapping at the point
+    // of construction sidesteps the ambiguity entirely and reads in the right
+    // order -- "a Kinesis publisher, wrapped in a breaker and a timeout".
+    // -----------------------------------------------------------------------
+
+    /**
+     * Built from the auto-configured registry rather than {@code CircuitBreaker.of(...)}.
+     *
+     * <p>That one choice is what makes it appear in {@code /actuator/circuitbreakers}, in the
+     * health indicator and as Micrometer gauges, because the starter's metrics binder walks
+     * the registry. A standalone instance works identically and is invisible -- which is the
+     * worst property a breaker can have, since "is it open right now?" is the first question
+     * anyone asks during an incident.
+     */
+    @Bean
+    CircuitBreaker eventPublisherCircuitBreaker(CircuitBreakerRegistry registry, PublisherResilienceProperties props) {
+        CircuitBreakerConfig config = CircuitBreakerConfig.custom()
+                // COUNT_BASED: the last N calls. TIME_BASED would be the last N seconds,
+                // which is better for steady traffic and worse here -- ingest is spiky by
+                // nature, and a quiet minute would age real failures out of the window.
+                .slidingWindowType(CircuitBreakerConfig.SlidingWindowType.COUNT_BASED)
+                .slidingWindowSize(props.slidingWindowSize())
+                .minimumNumberOfCalls(props.minimumNumberOfCalls())
+                .failureRateThreshold(props.failureRateThreshold())
+                .slowCallRateThreshold(props.slowCallRateThreshold())
+                .slowCallDurationThreshold(props.slowCallDurationThreshold())
+                .waitDurationInOpenState(props.waitDurationInOpenState())
+                .permittedNumberOfCallsInHalfOpenState(props.permittedCallsInHalfOpenState())
+                .build();
+
+        CircuitBreaker breaker = registry.circuitBreaker(PUBLISHER, config);
+
+        // One line per TRANSITION, not per rejected call. A breaker opens precisely when
+        // calls are failing at volume, so logging each rejection would bury the transition
+        // that explains it under thousands of lines of its own consequences.
+        breaker.getEventPublisher()
+                .onStateTransition(event -> log.warn(
+                        "Circuit breaker '{}' {} -- publishing is {}",
+                        event.getCircuitBreakerName(),
+                        event.getStateTransition(),
+                        switch (event.getStateTransition().getToState()) {
+                            case OPEN, FORCED_OPEN -> "refused; clients get 503 + Retry-After";
+                            case HALF_OPEN -> "being probed with a few trial calls";
+                            case CLOSED -> "flowing normally again";
+                            default -> "in state " + event.getStateTransition().getToState();
+                        }));
+
+        return breaker;
+    }
+
+    @Bean
+    TimeLimiter eventPublisherTimeLimiter(TimeLimiterRegistry registry, PublisherResilienceProperties props) {
+        TimeLimiterConfig config = TimeLimiterConfig.custom()
+                .timeoutDuration(props.callTimeout())
+                // Cancel the underlying future so the SDK can stop waiting on a socket nobody
+                // will read. It is a REQUEST, not a guarantee -- the record may still land,
+                // which is why a retry has to tolerate producing a duplicate.
+                .cancelRunningFuture(true)
+                .build();
+        return registry.timeLimiter(PUBLISHER, config);
+    }
+
+    /**
+     * Runs only the timeout callbacks, never the publish itself.
+     *
+     * <p>So one thread is enough regardless of load: each task does nothing but complete a
+     * future exceptionally once its deadline passes.
+     *
+     * <p>{@code destroyMethod = "shutdown"} on purpose. Spring would otherwise call
+     * {@code close()}, which since Java 19 waits for termination without a bound -- and a
+     * shutdown path that can block indefinitely is how a pod gets SIGKILLed mid-drain,
+     * undoing the ordering BS-01 exists to guarantee.
+     */
+    @Bean(destroyMethod = "shutdown")
+    ScheduledExecutorService publishTimeoutScheduler() {
+        return Executors.newSingleThreadScheduledExecutor(
+                Thread.ofPlatform().name("publish-timeout").daemon().factory());
     }
 
     @Bean

@@ -97,6 +97,17 @@ final class FakeAdapters {
             }
             return ClaimResult.of(claimed, already);
         }
+
+        @Override
+        public void release(TenantId tenant, List<EventId> eventIds) {
+            if (releaseFails) {
+                return; // models a Redis DEL that did not land
+            }
+            eventIds.forEach(id -> seen.remove(tenant.value() + ":" + id.value()));
+        }
+
+        /** Set true to model the release itself failing, so the retry is still swallowed. */
+        volatile boolean releaseFails;
     }
 
     /**

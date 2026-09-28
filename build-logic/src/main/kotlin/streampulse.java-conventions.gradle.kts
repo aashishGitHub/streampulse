@@ -124,30 +124,51 @@ tasks.withType<Test>().configureEach {
     // -----------------------------------------------------------------------
     // TESTCONTAINERS ON DOCKER DESKTOP FOR MAC
     //
-    // Docker Desktop exposes SEVERAL unix sockets. The one the CLI uses —
-    // ~/.docker/run/docker.sock, which /var/run/docker.sock symlinks to — is a
-    // thin stub: hitting /info on it returns HTTP 400 with an all-empty body and
-    // a `com.docker.desktop.address` label pointing elsewhere. The CLI knows to
-    // follow that; docker-java (and therefore Testcontainers) does not, and
-    // reports the famously unhelpful "Could not find a valid Docker environment".
+    // Docker Desktop exposes SEVERAL unix sockets and only some of them are the
+    // engine. Testcontainers has to be pointed at one that answers, and it fails
+    // in two different unhelpful ways when it is not: either "Could not find a
+    // valid Docker environment", or -- worse -- no error at all while it waits
+    // on a socket that will never reply.
     //
-    // The REAL engine socket is docker.raw.sock. Probing both makes the
-    // difference obvious:
+    // The active docker CONTEXT is the source of truth for which one is live.
     //
-    //   docker-cli.sock  → {"ServerVersion":"", "NCPU":0, ...}   (stub)
-    //   docker.raw.sock  → {"ServerVersion":"29.5.3","NCPU":8}   (engine)
+    // THE TRAP, learned the hard way: a socket EXISTING does not mean it answers.
+    // Docker Desktop leaves ~30 socket files in that directory, several of them
+    // dead. An earlier version of this file pinned docker.raw.sock because it was
+    // the live engine at the time. After a Docker Desktop upgrade it still exists,
+    // still accepts a connect(), and then never replies -- so Testcontainers hung
+    // at DockerClientFactory with no error at all, which looks exactly like a
+    // broken daemon and is not one.
     //
-    // So we point Testcontainers at the engine socket directly. Guarded three
-    // ways: only when the file exists, only when DOCKER_HOST is not already set
-    // (never override a deliberate choice), and it is a no-op on Linux and in CI
-    // where /var/run/docker.sock is the real thing.
+    // Probe with curl before believing any of this (an 8s timeout is plenty --
+    // a live socket answers instantly, a dead one answers never):
     //
-    // VERIFY: this is a Docker Desktop layout detail and may change between
-    // versions. If Testcontainers stops finding Docker, re-probe the sockets.
+    //   docker context ls        # the ENDPOINT column is the authoritative answer
+    //   curl -s --max-time 8 --unix-socket <path> http://localhost/v1.44/version
+    //
+    //     ~/.docker/run/docker.sock  → {"Version":"29.5.3","ApiVersion":"1.54"}  ✅
+    //     …/Data/docker.raw.sock     → (hangs, no output)                        ❌
+    //     …/Data/docker-cli.sock     → HTTP 400, empty body                      ❌
+    //
+    // So the candidates are ordered by what Docker Desktop actually serves today,
+    // with the historical location LAST rather than first. Guarded as before: only
+    // when DOCKER_HOST is unset (never override a deliberate choice), and a no-op
+    // on Linux and CI where /var/run/docker.sock is the real thing and matches
+    // first anyway.
+    //
+    // VERIFY: still a Docker Desktop layout detail, and it WILL move again. When
+    // Testcontainers next hangs or reports "Could not find a valid Docker
+    // environment", re-run the probe above and reorder this list.
     // -----------------------------------------------------------------------
     if (System.getenv("DOCKER_HOST") == null) {
-        val dockerDesktopSocket = File(System.getProperty("user.home"), "Library/Containers/com.docker.docker/Data/docker.raw.sock")
-        if (dockerDesktopSocket.exists()) {
+        val home = System.getProperty("user.home")
+        val dockerDesktopSocket = listOf(
+            File(home, ".docker/run/docker.sock"),                                  // Docker Desktop, current
+            File("/var/run/docker.sock"),                                           // Linux, CI, and the macOS symlink
+            File(home, "Library/Containers/com.docker.docker/Data/docker.raw.sock"), // older Docker Desktop
+        ).firstOrNull { it.exists() }
+
+        if (dockerDesktopSocket != null) {
             environment("DOCKER_HOST", "unix://${dockerDesktopSocket.absolutePath}")
 
             // docker-java (bundled with Testcontainers) negotiates Docker API 1.32 by

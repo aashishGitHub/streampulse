@@ -3,6 +3,7 @@
 package com.streampulse.ingest.adapter.in.rest;
 
 import com.streampulse.ingest.domain.BackpressureException;
+import com.streampulse.ingest.domain.PublishUnavailableException;
 import com.streampulse.ingest.domain.QuotaExceededException;
 import java.net.URI;
 import org.slf4j.Logger;
@@ -85,6 +86,41 @@ class IngestExceptionHandler {
         log.debug("Throttled: {}", e.getMessage());
 
         return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                .headers(headers)
+                .body(problem);
+    }
+
+    /**
+     * The event stream is unreachable: the circuit breaker is open, or the publish timed out.
+     *
+     * <h2>Why 503 and not 500</h2>
+     *
+     * Nothing is wrong with this batch. The same bytes will succeed once the dependency
+     * recovers, so the client must be told to keep them and come back — which is exactly
+     * what 503 + {@code Retry-After} means and what 500 does not. A client that sees 500
+     * reasonably concludes the request is broken and stops retrying, and that telemetry is
+     * gone for good.
+     *
+     * <p>The {@code Retry-After} is the breaker's own remaining open duration, so clients are
+     * not sent back while it is still guaranteed to refuse them.
+     */
+    @ExceptionHandler(PublishUnavailableException.class)
+    ResponseEntity<ProblemDetail> handlePublishUnavailable(PublishUnavailableException e) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(
+                HttpStatus.SERVICE_UNAVAILABLE, "The event stream is temporarily unavailable");
+        problem.setType(URI.create(PROBLEM_BASE + "stream-unavailable"));
+        problem.setTitle("Event stream unavailable");
+
+        long seconds = Math.max(1, e.retryAfter().toSeconds());
+        HttpHeaders headers = new HttpHeaders();
+        headers.add(HttpHeaders.RETRY_AFTER, String.valueOf(seconds));
+
+        // WARN, not ERROR: a degraded dependency is a real signal, but the breaker opening
+        // is the system protecting itself and the transition is already logged once where
+        // it happens. Paging on every rejected batch would page on the protection working.
+        log.warn("Publish unavailable ({}), advising retry after {}s", e.getMessage(), seconds);
+
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
                 .headers(headers)
                 .body(problem);
     }
