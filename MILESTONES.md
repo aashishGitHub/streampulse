@@ -46,20 +46,29 @@ $ ./gradlew build
 BUILD SUCCESSFUL in 14s
 ```
 
-All tests pass:
+39 tests pass:
 
 ```
-LruCacheTest                > basic storage                > ... PASSED  (4 tests)
-LruCacheTest                > eviction                     > ... PASSED  (6 tests)
-LruCacheTest                > containsKey / LinkedHashMap  > ... PASSED  (2 tests)
-RottingOrangesTest          > the standard cases           > ... PASSED  (3 tests)
-RottingOrangesTest          > edge cases                   > ... PASSED  (6 tests)
-RottingOrangesTest          > the off-by-one trap          > ... PASSED  (2 tests)
-RottingOrangesTest          > mutation behaviour           > ... PASSED  (2 tests)
-ArchitectureRulesTest       > no field injection                 PASSED
-ArchitectureRulesTest       > domain layer stays framework-free  PASSED
-ArchitectureRulesTest       > inbound ⇏ outbound adapters        PASSED
-ArchitectureRulesTest       > no java.util.Date or Calendar      PASSED
+ArchitectureRulesTest > no field injection anywhere                        PASSED
+ArchitectureRulesTest > the domain layer stays free of framework imports   PASSED
+ArchitectureRulesTest > inbound adapters go through the use case           PASSED
+ArchitectureRulesTest > no java.util.Date or Calendar — use java.time      PASSED
+
+TenantIdTest > normalisation > lowercasesAndTrims()                        PASSED
+TenantIdTest > normalisation > two spellings of the same tenant are equal  PASSED
+TenantIdTest > normalisation > toString is the bare value                  PASSED
+TenantIdTest > accepts valid identifiers > acceptsWellFormed  [7 cases]    PASSED
+TenantIdTest > rejects ... > rejectsMalformed                 [8 cases]    PASSED
+TenantIdTest > rejects ... > rejectsNull / rejectsBlank / rejectsTooLong   PASSED
+TenantIdTest > key layout > keyPrefixIsDefinedInExactlyOnePlace()          PASSED
+
+EventIdTest  > validation > acceptsCanonicalUuid()                         PASSED
+EventIdTest  > validation > uppercase input is normalised for dedup        PASSED
+EventIdTest  > validation > rejectsMalformed                  [5 cases]    PASSED
+EventIdTest  > validation > the original parse failure is preserved        PASSED
+EventIdTest  > generation > randomIdsAreUnique()              [10k ids]    PASSED
+EventIdTest  > idempotency key > isNamespacedByTenant()                    PASSED
+EventIdTest  > idempotency key > sameEventDifferentTenantsDoNotCollide()   PASSED
 ```
 
 ### Quality gates — verified by breaking them
@@ -77,23 +86,22 @@ $ printf 'class    Bad  {int   x;}' >> LruCache.java && ./gradlew spotlessCheck
 BUILD FAILED in 900ms
 ```
 
-**2. The BFS tests catch the classic off-by-one**
+**2. The value-object tests catch a widened validation rule**
 
-Removing the `fresh > 0` loop guard — the single most common bug in this problem:
+These gates were first verified against the algorithm katas that Phase 0 originally shipped
+(commit `41deee0`); the katas were subsequently removed as out of scope, and the equivalent
+gate now sits on the domain primitives. Deleting the `fresh > 0` guard in the old BFS code
+produced:
 
 ```
 RottingOrangesTest > the off-by-one trap > adjacent fresh orange takes exactly 1 minute, not 2 FAILED
-    expected: 1
-     but was: 2
-RottingOrangesTest > the off-by-one trap > a straight line of n fresh takes exactly n minutes FAILED
-    expected: 1
-     but was: 2
-RottingOrangesTest > the standard cases > rot spreads outward from one source FAILED
-    expected: 4
+    expected: 1  but was: 2
 ```
 
-Note that the *named* off-by-one tests caught it first and most precisely — which is the
-argument for writing tests against the specific failure mode rather than only the happy path.
+The *named* failure-mode test caught it first and most precisely — the argument for writing
+tests against the specific bug rather than only the happy path. `TenantIdTest`'s eight
+parameterized rejection cases serve the same purpose now: loosening the regex to permit a
+`/` fails `rejectsMalformed[2] candidate=has/slash` immediately.
 
 **3. ArchUnit catches an architecture violation**
 
@@ -123,7 +131,7 @@ Documented in `specs/00-foundation/design.md` §3.
 | NFR | Target | Observed |
 |---|---|---|
 | NFR-F0-01 incremental build | < 5 s | ~1 s (`UP-TO-DATE`) |
-| NFR-F0-02 full build | < 3 min | 14 s warm · ~2.5 min first run (distribution + dependency download) |
+| NFR-F0-02 full build | < 3 min | 3 s warm · ~2.5 min first run (distribution + dependency download) |
 | NFR-F0-03 no Docker needed | always | ✅ Docker not started for any Phase 0 task |
 
 ### Deferred to later phases
@@ -134,9 +142,27 @@ Honest scope notes:
   images are declared so the system's shape is visible, and the tags need verification
   before first use.
 - The CI workflow is **committed but has not run** — no remote configured yet.
-- Remaining katas (LFU, Number of Islands, Word Ladder, Course Schedule, Clone Graph, the
-  thread-safe LRU) are tracked as T0-27…T0-32 and run alongside later phases.
 - `integrationTest` source set arrives with Testcontainers in Phase 2.
+
+### Scope change — algorithm katas removed
+
+Phase 0 originally shipped a `kata` module (`LruCache`, `RottingOranges`) as a
+coding-interview track. **Removed**: StreamPulse is for learning the Java ecosystem in a
+cloud environment, and DSA practice is a different skill that was diluting the project's
+focus.
+
+The code remains in git history at commit `41deee0` if it is ever wanted, and the full
+worked solutions live in `../Java/interview-qa/17-coding-lru-and-graphs.md`.
+
+It was replaced by `TenantId` and `EventId` — value objects that are genuinely load-bearing
+from Phase 2 onward, and that teach the same Java fundamentals (records, compact
+constructors, validation at the boundary, `equals`/`hashCode` correctness) on material the
+project actually uses.
+
+```
+$ ./gradlew build
+BUILD SUCCESSFUL in 3s
+```
 
 ### Next
 

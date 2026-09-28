@@ -2,7 +2,7 @@
 
 **Status:** in progress
 **Depends on:** nothing
-**Delivers:** a build you can trust, and the first algorithms with tests
+**Delivers:** a build you can trust, and the domain primitives every service will use
 
 ---
 
@@ -16,8 +16,9 @@ So Phase 0 has a deliberately narrow goal: **prove the foundation works on plain
 before any framework is involved.** No Spring, no Docker, no Kafka. If something fails
 here, there is nothing else in the room.
 
-It also starts the kata track, which runs in parallel through every later phase, because
-coding-round practice needs repetition over weeks rather than a cram at the end.
+It also lands the two value objects that every later phase depends on — `TenantId` and
+`EventId`. They are small enough to belong in a foundation phase and load-bearing enough
+that getting them wrong would contaminate everything built on top.
 
 ---
 
@@ -33,8 +34,9 @@ coding-round practice needs repetition over weeks rather than a cram at the end.
   again contains the comment "nit: spacing".
 - **As an architect**, I want architectural rules enforced by failing tests rather than by
   documentation, so that the design cannot silently decay.
-- **As an interview candidate**, I want the LRU cache and multi-source BFS implemented and
-  tested, so that I can practise against something that actually runs.
+- **As a developer**, I want tenant and event identifiers to be validated types rather than
+  bare strings, so that a swapped argument is a compile error instead of a cross-tenant data
+  leak.
 
 ---
 
@@ -73,18 +75,23 @@ coding-round practice needs repetition over weeks rather than a cram at the end.
 - **REQ-F0-11** Architecture rules SHALL be written so they pass on an empty codebase
   (`allowEmptyShould(true)`) and begin policing real classes as later phases add them.
 
-### Kata
+### Domain primitives
 
-- **REQ-F0-12** THE SYSTEM SHALL provide an `LruCache` with O(1) `get` and `put`,
-  implemented with a hash map plus a doubly linked list, **not** `LinkedHashMap`.
-- **REQ-F0-13** `LruCache` SHALL treat both `get` and a `put` on an existing key as an
-  access that protects the entry from eviction, and `containsKey` as a peek that does not.
-- **REQ-F0-14** `LruCache` SHALL reject a capacity ≤ 0 at construction.
-- **REQ-F0-15** THE SYSTEM SHALL provide `RottingOranges.minutesUntilAllRot` implementing
-  multi-source BFS, returning the elapsed minutes, `0` when no fresh cells exist, and `-1`
-  when any fresh cell is unreachable.
-- **REQ-F0-16** Kata tests SHALL assert eviction **order** and BFS **level counting**
-  explicitly, not merely final membership, because those are where the real bugs are.
+- **REQ-F0-12** THE SYSTEM SHALL provide a `TenantId` value type that validates its input
+  and rejects anything that would be unsafe as a Kafka record key, Redis key prefix,
+  DynamoDB partition key, S3 object prefix or Prometheus label value.
+- **REQ-F0-13** `TenantId` SHALL normalise by trimming and lowercasing with an explicit
+  `Locale.ROOT`, so that the same input produces the same identifier on every machine.
+- **REQ-F0-14** `TenantId` SHALL expose the shared key prefix in exactly one place, so that
+  the storage key layout is defined once rather than string-concatenated at each call site.
+- **REQ-F0-15** THE SYSTEM SHALL provide an `EventId` value type wrapping a canonical UUID,
+  which serves as the pipeline's idempotency key, and which is **client-generated** so that
+  a retried request carries the same id as the original.
+- **REQ-F0-16** `EventId` SHALL produce an idempotency key namespaced by `TenantId`, so that
+  one tenant's traffic can neither collide with nor evict another's in a shared cache.
+- **REQ-F0-17** WHEN an identifier is malformed THE SYSTEM SHALL throw
+  `IllegalArgumentException` naming the offending value, and SHALL preserve the underlying
+  parse failure as the cause.
 
 ---
 
@@ -94,7 +101,7 @@ coding-round practice needs repetition over weeks rather than a cram at the end.
 |---|---|---|---|
 | NFR-F0-01 | Incremental build with no changes | < 5 s | `./gradlew build` twice; second run is `UP-TO-DATE` |
 | NFR-F0-02 | Full clean build on this machine | < 3 min | `./gradlew clean build`, timed |
-| NFR-F0-03 | Kata tests need no Docker, no network | always | run with Docker stopped |
+| NFR-F0-03 | Phase 0 tests need no Docker, no network | always | run with Docker stopped |
 | NFR-F0-04 | Build is reproducible across machines | — | toolchain + pinned wrapper + locked versions |
 
 > These are **targets chosen for this exercise**, not measurements. `MILESTONES.md` records
@@ -107,8 +114,10 @@ coding-round practice needs repetition over weeks rather than a cram at the end.
 Deliberately excluded, to keep the failure surface small:
 
 - Spring Boot (Phase 2) · Docker (Phase 2) · Kafka (Phase 2) · CI beyond a build job
-- The remaining kata problems (LFU, Word Ladder, Clone Graph) — added as the kata track
-  continues alongside later phases
+- Algorithm/DSA practice — **out of scope for this project entirely.** StreamPulse is for
+  learning the Java ecosystem in a cloud environment. Coding-round preparation lives in
+  `../Java/interview-qa/17-coding-lru-and-graphs.md`
+- The full telemetry event model and its Avro schema (Phase 1)
 
 ---
 
@@ -119,7 +128,7 @@ Deliberately excluded, to keep the failure surface small:
 - [ ] `gradle-wrapper.properties` contains `distributionSha256Sum`
 - [ ] No module build file contains a literal dependency version
 - [ ] `./gradlew spotlessCheck` passes; deliberately misformatting a file makes it fail
-- [ ] JaCoCo HTML report exists at `kata/build/reports/jacoco/test/html/index.html`
+- [ ] JaCoCo HTML report exists at `libs/platform/build/reports/jacoco/test/html/index.html`
 - [ ] All four architecture rules execute and pass
-- [ ] `LruCacheTest` and `RottingOrangesTest` pass, including the order/level assertions
+- [ ] `TenantIdTest` and `EventIdTest` pass, including every rejection case
 - [ ] Verified command output pasted into `MILESTONES.md`

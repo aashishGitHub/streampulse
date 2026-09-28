@@ -66,9 +66,9 @@ keeps a queryable history. Three fictional tenants share it: `streamflix` (gener
 ## Quick start
 
 ```bash
-./gradlew build          # compile + test everything (no Docker needed yet)
-./gradlew :kata:test     # just the algorithm katas
-make help                # every available command
+./gradlew build   # compile + test everything (no Docker needed yet)
+make help         # every available command
+make doctor       # check your machine has what this project needs
 ```
 
 The Gradle **wrapper** is committed, so you do not need Gradle installed — `./gradlew`
@@ -83,8 +83,7 @@ and, from Phase 2, **Docker**.
 |---|---|
 | `build-logic/` | Convention plugins — the build's "house style", written once |
 | `gradle/libs.versions.toml` | Every dependency version, in one file |
-| `kata/` | Algorithm practice with real tests (LRU cache, multi-source BFS) |
-| `libs/platform/` | Our own shared library → becomes a Spring Boot starter in Phase 2 |
+| `libs/platform/` | Shared kernel: domain primitives + architecture rules → becomes a Spring Boot starter in Phase 2 |
 | `specs/` | Spec-driven development: requirements → design → tasks, per phase |
 | `docs/adr/` | Architecture Decision Records — *why*, not *what* |
 | `docs/learning/` | Guided explanations, especially for the .NET → Java transition |
@@ -115,7 +114,7 @@ code**, so "done" is a fact rather than an opinion.
 
 | Phase | Delivers | Status |
 |---|---|---|
-| **0** | Build foundation, conventions, kata, architecture rules | 🔨 in progress |
+| **0** | Build foundation, conventions, domain primitives, architecture rules | ✅ done |
 | 1 | Contracts & schemas (Avro, OpenAPI, AsyncAPI) | ⬜ |
 | 2 | Ingest gateway (MVC + virtual threads, gRPC, idempotency, backpressure) | ⬜ |
 | 3 | Stream processing (Kafka Streams, windowing, exactly-once) | ⬜ |
@@ -136,6 +135,11 @@ code**, so "done" is a fact rather than an opinion.
 ## If you are reading this to learn
 
 Start with [`docs/learning/00-how-to-read-this-repo.md`](docs/learning/00-how-to-read-this-repo.md).
+
+**Scope note:** this project is about the **Java ecosystem in a cloud environment** —
+Spring Boot, Kafka, streaming, storage, observability, AWS, Kubernetes. It is deliberately
+*not* algorithm practice. Coding-round preparation lives separately in
+[`../Java/interview-qa/17-coding-lru-and-graphs.md`](../Java/interview-qa/17-coding-lru-and-graphs.md).
 
 The code is commented far more heavily than production code should be. That is deliberate:
 the comments explain **why** a design was chosen and what the alternatives cost, which is

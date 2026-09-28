@@ -14,7 +14,7 @@ Implements [`requirements.md`](requirements.md). ADRs:
   │  settings.gradle.kts        WHICH modules exist               │
   │    ├── pluginManagement { includeBuild("build-logic") }       │
   │    ├── dependencyResolutionManagement (PREFER_SETTINGS)       │
-  │    └── include("kata"), include("libs:platform")              │
+  │    └── include("libs:platform")                               │
   └───────────────────────────┬──────────────────────────────────┘
                               │ compiled FIRST (composite build)
   ┌───────────────────────────▼──────────────────────────────────┐
@@ -28,12 +28,17 @@ Implements [`requirements.md`](requirements.md). ADRs:
   │      • -Xlint:all  -parameters                                │
   └───────────────────────────┬──────────────────────────────────┘
                               │ applied by id
-        ┌─────────────────────┴─────────────────────┐
-        ▼                                           ▼
-  ┌───────────┐                             ┌──────────────┐
-  │  kata     │  plain Java algorithms      │ libs:platform│  future starter
-  │           │  LruCache, RottingOranges   │              │  ArchUnit rules
-  └───────────┘                             └──────────────┘
+                              │ applied by id
+                              ▼
+                     ┌──────────────────────┐
+                     │  libs:platform       │  shared kernel
+                     │  • TenantId, EventId │  → Spring Boot starter (Phase 2)
+                     │  • ArchUnit rules    │
+                     └──────────────────────┘
+
+  Services (ingest-gateway, stream-processor, sink-writer, query-api,
+  control-plane) are added from Phase 2 onward, each applying the same
+  convention plugin.
 ```
 
 **Why a composite build rather than `buildSrc`:** a change to `buildSrc` invalidates the
@@ -100,54 +105,81 @@ with the missing alias named, and it teaches the model rather than a hack.
 
 ---
 
-## 4. Kata design
+## 4. Domain primitives
 
-### LruCache — why two data structures
+Two value objects that every later phase uses. They are in `libs:platform` because they are
+shared kernel — not owned by any one service.
 
-| Requirement | Structure that provides it in O(1) |
-|---|---|
-| look up a value by key | hash map |
-| know which key is least recently used | ordered list |
-| move an entry to most-recent | **doubly** linked list |
+### Why types instead of `String`
 
-```
-  map:  {"a" → ●,  "b" → ●,  "c" → ●}
-               │        │        │
-               ▼        ▼        ▼
-  head ⇄ [ c ] ⇄ [ b ] ⇄ [ a ] ⇄ tail
-         MRU                LRU
+```java
+void publish(String tenantId, String titleId) { ... }
+publish(titleId, tenantId);   // compiles fine. ships. leaks data across tenants.
 ```
 
-Two design decisions worth defending out loud:
+With distinct types that call does not compile. In a multi-tenant system the tenant id
+decides **data isolation**, so a swapped argument is not a bug — it is a cross-tenant leak.
+A type is the cheapest available control against the most expensive possible failure.
 
-1. **Doubly, not singly, linked.** Unlinking a node requires its predecessor. In a singly
-   linked list that search is O(n), which would make `get` O(n) and defeat the point.
-2. **Sentinel head and tail.** They are never removed, so every real node always has both
-   neighbours, and link/unlink have *no* null checks and *no* special cases. Two wasted
-   objects buy a provably simpler implementation.
+Validating once at the boundary also means every layer downstream can assume well-formed
+input: no defensive re-checking, no "has this been lowercased yet?" uncertainty.
 
-The node stores its own key so eviction can remove it from the map — a detail people forget,
-producing a map that grows forever while the list stays bounded.
+### `TenantId`
 
-### RottingOranges — multi-source BFS
+```
+   input  "  StreamFlix  "
+      │
+      ├─ trim + toLowerCase(Locale.ROOT)   ← explicit locale: with a Turkish default,
+      │                                       "I".toLowerCase() is a dotless "ı" and the
+      │                                       same input yields different ids per machine
+      ├─ reject blank
+      ├─ reject length > 32
+      └─ reject ^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$ mismatch
+      │
+   value  "streamflix"  ──▶ safe as: Kafka key · Redis prefix · DynamoDB PK
+                                     S3 prefix · Prometheus label
+```
 
-The instinct is one BFS per rotten orange, taking the minimum: O(sources × cells). Instead,
-**seed every source into the queue before the loop**. All sources are at distance 0, BFS
-expands them in lockstep, and the first time a cell is reached is automatically via its
-nearest source. One pass, O(cells).
+The character set is deliberately narrow. A tenant id containing `/`, a space or `#` would
+break at least one of those five sinks — in production, months later, for one customer.
 
-Two bugs this design guards against, both encoded as tests:
+Normalisation happens **before** validation, so `" StreamFlix "` is accepted and stored
+canonically. Doing it the other way round would reject values we intend to allow.
 
-| Bug | Guard |
-|---|---|
-| counting nodes instead of minutes | snapshot `queue.size()` per level and drain exactly that many |
-| returning one minute too many | the `fresh > 0` loop guard — the last level adds nothing, so no minute passed |
+### `EventId` — why the client generates it
 
-Cells are marked rotten **on enqueue, not on dequeue**. The grid doubles as the visited set,
-so no `boolean[][]` is needed; marking late would let two neighbours enqueue the same cell in
-one minute and corrupt the fresh count.
+```
+   player ──[event, id=abc]──▶ ingest ──▶ Kafka
+      │                           │
+      │      ✗ the RESPONSE is lost (the write already succeeded)
+      │
+      └──[event, id=abc]──▶ ingest ──▶ "seen abc" → 200 OK, no duplicate
+              retry
+```
 
----
+If the **server** minted the id, the retry would be a different event and the duplicate
+would be undetectable. Because the client generates it once and reuses it across retries,
+at-least-once delivery plus a dedup check becomes **effectively-once** processing. Same
+reasoning as Stripe's `Idempotency-Key`.
+
+It is stored as a canonical lowercase string, not a `UUID` object: the value crosses Avro,
+JSON and protobuf boundaries as text, so re-parsing at every hop is wasted work. It is
+validated once, here, by round-tripping through `UUID.fromString` — a hand-rolled regex
+would accept input the JDK rejects.
+
+### Why `record`
+
+Records give a canonical constructor, accessors, `equals`, `hashCode` and `toString` for
+free and correct, and are implicitly final and shallowly immutable. Correct `equals`/
+`hashCode` is what makes these safe as `HashMap` keys — asserted directly in the tests.
+
+The **compact constructor** (`TenantId { ... }` with no parameter list) runs before fields
+are assigned, so reassigning the parameter changes what gets stored. That is where
+normalisation and validation belong.
+
+> **.NET note:** close to a C# `record`, with two differences. Java accessors are methods —
+> `tenantId.value()`, not `.Value`, since Java has no properties. And there is no `with`
+> expression; you construct a new instance explicitly.
 
 ## 5. Architecture rules
 
@@ -169,7 +201,7 @@ which is the only ordering that works.
 
 | Level | What | Tooling | Needs Docker |
 |---|---|---|---|
-| unit | `LruCache`, `RottingOranges` | JUnit 5 + AssertJ | no |
+| unit | `TenantId`, `EventId` — mostly **rejection** cases | JUnit 5 + AssertJ | no |
 | architecture | the four rules above | ArchUnit | no |
 | build | wrapper, toolchain, catalog, spotless | manual + CI | no |
 

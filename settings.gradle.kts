@@ -52,10 +52,10 @@ dependencyResolutionManagement {
 // the toolchain, the tests and the architecture rules work on plain Java first.
 // Every later phase adds modules here — the file grows as the system does.
 //
-//   kata           plain-Java algorithm practice (LRU, BFS) with real tests.
-//                  Doubles as the coding-interview prep track.
-//   libs:platform  our own Spring Boot starter (auto-config, error model,
-//                  idempotency). Phase 0 ships only the architecture test.
+//   libs:platform  shared kernel → becomes our own Spring Boot starter.
+//                  Phase 0 ships the domain primitives every service will use
+//                  (TenantId, EventId) plus the architecture rules that police
+//                  the whole codebase.
 //
 // Coming later:
 //   libs:contracts            Phase 1  (Avro + OpenAPI + proto codegen)
@@ -65,5 +65,4 @@ dependencyResolutionManagement {
 //   services:query-api        Phase 5
 //   services:control-plane    Phase 6
 // ---------------------------------------------------------------------------
-include("kata")
 include("libs:platform")

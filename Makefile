@@ -35,10 +35,6 @@ build: ## Compile everything and run all tests
 test: ## Fast tests only (unit + architecture, no Docker)
 	./gradlew test
 
-.PHONY: kata
-kata: ## Run just the algorithm katas
-	./gradlew :kata:test
-
 .PHONY: it
 it: ## Integration tests (needs Docker; arrives in Phase 2)
 	./gradlew integrationTest
@@ -58,7 +54,7 @@ clean: ## Delete all build output
 .PHONY: coverage
 coverage: ## Run tests and open the coverage report
 	./gradlew test jacocoTestReport
-	@echo "Report: kata/build/reports/jacoco/test/html/index.html"
+	@echo "Report: libs/platform/build/reports/jacoco/test/html/index.html"
 
 # ---------------------------------------------------------------------------
 # Local infrastructure (Docker Compose profiles)

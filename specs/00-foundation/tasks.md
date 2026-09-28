@@ -20,7 +20,7 @@ Each task is: **write the check first, then make it pass.** Requirement IDs refe
   → REQ-F0-02
   - Downloaded the distribution, verified its SHA-256 against `services.gradle.org` before
     using it to generate the wrapper.
-- [x] **T0-06** Add `kata` and `libs:platform` module build files. → REQ-F0-06
+- [x] **T0-06** Add the `libs:platform` module build file. → REQ-F0-06
 - [x] **T0-07** Confirm `./gradlew build` succeeds end to end. → REQ-F0-01
 
 ## Quality gates
@@ -32,12 +32,16 @@ Each task is: **write the check first, then make it pass.** Requirement IDs refe
   *(A quality gate nobody has seen fail is not a quality gate.)*
 - [ ] **T0-12** Verify an ArchUnit rule **fails** when violated, then revert.
 
-## Kata
+## Domain primitives
 
-- [x] **T0-13** `LruCache`: hash map + doubly linked list, sentinels. → REQ-F0-12/13/14
-- [x] **T0-14** `LruCacheTest`: eviction **order**, not just membership. → REQ-F0-16
-- [x] **T0-15** `RottingOranges`: multi-source BFS, level counting. → REQ-F0-15
-- [x] **T0-16** `RottingOrangesTest`: edge cases + the off-by-one trap. → REQ-F0-16
+- [x] **T0-13** `TenantId`: validated record, `Locale.ROOT` normalisation, key prefix.
+  → REQ-F0-12/13/14
+- [x] **T0-14** `TenantIdTest`: parameterized **rejection** cases for every character class
+  that would break a downstream key. → REQ-F0-12/17
+- [x] **T0-15** `EventId`: canonical UUID, client-generated, tenant-namespaced idempotency
+  key. → REQ-F0-15/16
+- [x] **T0-16** `EventIdTest`: malformed input, case normalisation, cause preservation,
+  cross-tenant key isolation. → REQ-F0-16/17
 
 ## Infrastructure scaffolding
 
@@ -55,14 +59,9 @@ Each task is: **write the check first, then make it pass.** Requirement IDs refe
 - [ ] **T0-25** `docs/learning/01-gradle-for-dotnet-devs.md`.
 - [ ] **T0-26** Paste verified command output into `MILESTONES.md`.
 
-## Remaining kata (runs alongside later phases — not a Phase 0 blocker)
-
-- [ ] **T0-27** `ThreadSafeLruCache` — and the discussion of why a *read* needs the write lock.
-- [ ] **T0-28** LFU cache.
-- [ ] **T0-29** Number of Islands.
-- [ ] **T0-30** Word Ladder.
-- [ ] **T0-31** Course Schedule (topological sort) — the algorithm Phase 6 reuses.
-- [ ] **T0-32** Clone Graph.
+> **Out of scope:** algorithm/DSA practice was removed from this project. StreamPulse is
+> for learning the Java ecosystem in a cloud environment; coding-round preparation lives in
+> `../Java/interview-qa/17-coding-lru-and-graphs.md`.
 
 ---
 

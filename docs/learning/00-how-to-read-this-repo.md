@@ -36,9 +36,13 @@ learn **judgement** — which is the thing being assessed at senior level.
 Each phase is chosen to make one hard concept concrete. The left column is roughly the
 level at which that concept starts to matter.
 
+> **Scope:** this project teaches the **Java ecosystem in a cloud environment**. There is no
+> algorithm/DSA content here by design — that is a different skill, prepared separately in
+> [`../../../Java/interview-qa/17-coding-lru-and-graphs.md`](../../../Java/interview-qa/17-coding-lru-and-graphs.md).
+
 | Level | Phase | The concept you actually learn |
 |---|---|---|
-| Foundation | **0** | A build you can trust. Toolchains, dependency management, architecture as tests. |
+| Foundation | **0** | A build you can trust. Toolchains, dependency management, architecture as tests, value objects over primitives. |
 | Junior → Mid | 1 | Contracts before code. Schema evolution, and why field numbers are permanent. |
 | Mid | 2 | HTTP done properly: validation, idempotency, **backpressure**, rate limiting. |
 | Mid → Senior | 3 | Stream processing: windows, event time vs processing time, exactly-once's real limits. |
@@ -94,8 +98,8 @@ These exist because a portfolio project is only useful if you can defend every c
 2. Read `design.md`. Before looking at the code, sketch how *you* would build it.
 3. Read the code. Where it differs from your sketch, work out which is better and why.
    Sometimes yours will be — the design notes are opinions, not scripture.
-4. Break something on purpose. Delete the `fresh > 0` guard in `RottingOranges` and watch
-   which test fails. **A test suite you have never seen fail is not evidence of anything.**
+4. Break something on purpose. Loosen `TenantId`'s regex to allow a `/`, and watch which
+   test fails. **A test suite you have never seen fail is not evidence of anything.**
 5. Open the matching file in `../Java/interview-qa/` and answer its questions out loud.
 
 Step 4 is the one people skip, and it is the one that converts reading into knowing.
@@ -106,6 +110,6 @@ Step 4 is the one people skip, and it is the one that converts reading into know
 
 Study material sits in the sibling repo: [`../Java/interview-qa/`](../../Java/interview-qa/)
 
-Each phase here maps to files there. Phase 0's foundations connect to
-`01-spring-core.md` (build and lifecycle), `14-testing.md` (the pyramid, ArchUnit) and
-`17-coding-lru-and-graphs.md` (the katas in `kata/`).
+Each phase here maps to files there. Phase 0's foundations connect to `01-spring-core.md`
+(build, bean lifecycle) and `14-testing.md` (the test pyramid, ArchUnit, parameterized
+tests).
