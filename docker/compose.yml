@@ -1,0 +1,179 @@
+# ============================================================================
+#  StreamPulse local stack
+#
+#  PROFILES: nothing starts unless you ask for its profile. This matters —
+#  running the whole estate costs roughly 8-10 GB of RAM. Start what the phase
+#  you are working on needs:
+#
+#    make up-core   Kafka, Postgres, Redis, Keycloak       (Phase 2+)
+#    make up-aws    moto, DynamoDB Local                   (Phase 4+)
+#    make up-obs    Prometheus, Grafana, Tempo, Loki       (Phase 8+)
+#    make up-full   everything
+#
+#  Phase 0 needs NONE of this. It is declared now so the shape of the system is
+#  visible from the start, and so each later phase only has to flip a profile on.
+#
+#  IMAGE TAGS ARE PINNED. `latest` makes a build non-reproducible and one day
+#  breaks CI for reasons unrelated to your change.
+#
+#  VERIFY before first use: image tags below were chosen at authoring time and
+#  should be checked against current releases.
+# ============================================================================
+
+name: streampulse
+
+services:
+  # -------------------------------------------------------------------------
+  # KAFKA — the backbone. KRaft mode: no ZooKeeper, single broker for local dev.
+  # Production would run 3+ brokers with replication factor 3.
+  # -------------------------------------------------------------------------
+  kafka:
+    image: apache/kafka:3.9.0
+    profiles: [core]
+    container_name: sp-kafka
+    ports:
+      - "9092:9092"      # clients on the host connect here
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller        # KRaft: one node does both
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://:19092,CONTROLLER://:9093,PLAINTEXT_HOST://:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:19092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      # Single broker ⇒ every replication factor must be 1, or topic creation fails.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0     # rebalance immediately in dev
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # -------------------------------------------------------------------------
+  # POSTGRES — control plane. wal_level=logical is required for Debezium CDC
+  # (Phase 6): without it the replication slot cannot be created.
+  # -------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    profiles: [core]
+    container_name: sp-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: streampulse
+      POSTGRES_PASSWORD: streampulse      # local only; real secrets never live in git
+      POSTGRES_DB: streampulse
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"               # ← enables CDC in Phase 6
+      - "-c"
+      - "max_replication_slots=4"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U streampulse"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # -------------------------------------------------------------------------
+  # REDIS — hot metric cache, idempotency keys, distributed rate-limit buckets.
+  # -------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    profiles: [core]
+    container_name: sp-redis
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # -------------------------------------------------------------------------
+  # KEYCLOAK — real OIDC provider issuing real JWTs. Chosen over a mock so the
+  # JWT validation path is genuinely exercised (and it is the Java-ecosystem
+  # standard, so it is a transferable skill).
+  # -------------------------------------------------------------------------
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    profiles: [core]
+    container_name: sp-keycloak
+    ports:
+      - "8081:8080"
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HEALTH_ENABLED: "true"
+    command: ["start-dev"]
+
+  # -------------------------------------------------------------------------
+  # MOTO — fakes S3, SQS and Kinesis over one endpoint. Free, no AWS account.
+  # See ADR-0003 for exactly what this does and does NOT prove.
+  # -------------------------------------------------------------------------
+  moto:
+    image: motoserver/moto:5.0.18
+    profiles: [aws]
+    container_name: sp-moto
+    ports:
+      - "5001:5000"
+    environment:
+      MOTO_PORT: 5000
+
+  # -------------------------------------------------------------------------
+  # DYNAMODB LOCAL — AWS's own emulator, so fidelity is high.
+  # -------------------------------------------------------------------------
+  dynamodb:
+    image: amazon/dynamodb-local:2.5.3
+    profiles: [aws]
+    container_name: sp-dynamodb
+    ports:
+      - "8000:8000"
+    command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-inMemory"]
+
+  # -------------------------------------------------------------------------
+  # OBSERVABILITY (Phase 8)
+  # -------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v3.0.1
+    profiles: [obs]
+    container_name: sp-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    profiles: [obs]
+    container_name: sp-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+
+  # -------------------------------------------------------------------------
+  # UI helpers
+  # -------------------------------------------------------------------------
+  kafka-ui:
+    image: kafbat/kafka-ui:v1.0.0
+    profiles: [ui]
+    container_name: sp-kafka-ui
+    ports:
+      - "8090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:19092
+    depends_on:
+      - kafka
+
+volumes:
+  postgres-data:

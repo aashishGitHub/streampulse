@@ -1,0 +1,85 @@
+# ============================================================================
+#  VERSION CATALOG  —  the single place where dependency versions live.
+# ============================================================================
+#
+#  WHY THIS FILE EXISTS
+#  --------------------
+#  In a multi-module build, the same library gets used by many modules. Without
+#  a catalog, each module's build file names its own version, they drift, and
+#  you end up debugging why module A has JUnit 5.9 and module B has 5.12.
+#
+#  Gradle reads this file and generates type-safe accessors, so in a build
+#  script you write:      testImplementation(libs.assertj)
+#  instead of:            testImplementation("org.assertj:assertj-core:3.27.3")
+#
+#  Your IDE autocompletes `libs.` and a typo becomes a COMPILE error in the
+#  build script, not a "could not resolve dependency" failure minutes later.
+#
+#  .NET ANALOGY
+#  ------------
+#  This is Directory.Packages.props with Central Package Management
+#  (<ManagePackageVersionsCentrally>). Same idea, same motivation.
+#
+#  HOW TO UPGRADE SOMETHING
+#  ------------------------
+#  Change the number in [versions] below. That's it — every module follows.
+#
+#  ONLY STABLE RELEASES GO IN HERE. No -M1, -RC1, -SNAPSHOT. A milestone
+#  release in a learning project turns "why doesn't this work" into a research
+#  project about someone else's unfinished code.
+# ============================================================================
+
+[versions]
+# --- Language / build ------------------------------------------------------
+java              = "21"        # Java 21 LTS: virtual threads (Project Loom) are GA here.
+                                # Verify the LTS your target company runs before interviewing.
+
+# --- Testing (used from Phase 0 onward) ------------------------------------
+junit             = "5.12.2"    # JUnit 5 ("Jupiter"). The BOM aligns all junit-* artifacts.
+assertj           = "3.27.3"    # Fluent assertions. Failure messages are far better than JUnit's.
+mockito           = "5.18.0"    # Mocks. Used sparingly — see docs/learning, we prefer fakes.
+archunit          = "1.4.1"     # Architecture rules AS TESTS. Enforces our hexagonal boundaries.
+awaitility        = "4.3.0"     # Poll-until-true for async assertions. Replaces Thread.sleep().
+
+# --- Arriving in later phases (declared now so versions live in one place) --
+springBoot        = "3.5.3"     # Phase 2+. NOT applied yet — Phase 0 is deliberately plain Java.
+testcontainers    = "1.21.3"    # Phase 2+. Real Postgres/Kafka/Redis in integration tests.
+slf4j             = "2.0.17"    # Logging facade.
+
+# --- Build plugins ---------------------------------------------------------
+spotless          = "7.0.4"     # Auto-formatting. Ends every "reformat the file" code review.
+palantirFormat    = "2.68.0"    # The Java formatter Spotless drives. Opinionated, zero config.
+
+[libraries]
+# Format: alias = { module = "group:artifact", version.ref = "<key from [versions]>" }
+#
+# A "BOM" (Bill of Materials) is a dependency that only declares versions for a
+# FAMILY of artifacts. Import it once, then list the family members with no
+# version at all. .NET has no direct equivalent; it is a Maven-ecosystem idea.
+junit-bom          = { module = "org.junit:junit-bom",                    version.ref = "junit" }
+junit-jupiter      = { module = "org.junit.jupiter:junit-jupiter" }                    # version from BOM
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }    # version from BOM
+
+assertj            = { module = "org.assertj:assertj-core",               version.ref = "assertj" }
+mockito-core       = { module = "org.mockito:mockito-core",               version.ref = "mockito" }
+mockito-junit      = { module = "org.mockito:mockito-junit-jupiter",      version.ref = "mockito" }
+archunit-junit5    = { module = "com.tngtech.archunit:archunit-junit5",   version.ref = "archunit" }
+awaitility         = { module = "org.awaitility:awaitility",              version.ref = "awaitility" }
+
+slf4j-api          = { module = "org.slf4j:slf4j-api",                    version.ref = "slf4j" }
+
+testcontainers-bom = { module = "org.testcontainers:testcontainers-bom",  version.ref = "testcontainers" }
+
+# Plugin MARKER artifacts. To APPLY a third-party plugin from inside a
+# convention plugin, build-logic needs it on its compile classpath as a normal
+# dependency. The id "com.diffplug.spotless" maps to this artifact. Non-obvious,
+# and one of the most common "why won't my convention plugin compile" errors.
+spotless-plugin    = { module = "com.diffplug.spotless:spotless-plugin-gradle", version.ref = "spotless" }
+
+[bundles]
+# A bundle is a named group of libraries you almost always want together.
+# One line in a build file instead of five.
+testing = ["junit-jupiter", "assertj", "mockito-core", "mockito-junit", "awaitility"]
+
+[plugins]
+spotless = { id = "com.diffplug.spotless", version.ref = "spotless" }

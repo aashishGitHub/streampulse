@@ -1,0 +1,35 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+!gradle/wrapper/gradle-wrapper.properties
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+!.vscode/settings.json
+.settings/
+.classpath
+.project
+
+# OS
+.DS_Store
+
+# Java
+*.class
+hs_err_pid*
+replay_pid*
+
+# Secrets — never commit these
+.env
+.env.local
+*.pem
+*.key
+
+# Local data / profiling output
+data/
+*.jfr
+*.hprof

@@ -1,0 +1,13 @@
+# Minimal Prometheus config. Phase 8 adds real scrape targets and recording rules.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+  # Services are added here as each phase brings one online, e.g.:
+  # - job_name: ingest-gateway
+  #   metrics_path: /actuator/prometheus
+  #   static_configs: [{ targets: ['host.docker.internal:8080'] }]

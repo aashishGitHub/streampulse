@@ -1,0 +1,66 @@
+# ============================================================================
+#  CI — runs on every push and pull request.
+#
+#  Phase 0 keeps this deliberately small: build + test + format check. It grows
+#  with the project (integration tests in Phase 2, Terraform validate in 10).
+#
+#  A CI pipeline nobody trusts is worse than none, so every step here must be
+#  one that fails for a real reason.
+# ============================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel an in-progress run when new commits land on the same branch.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The toolchain in build-logic pins Java 21, but the Gradle process itself
+      # needs a JDK to start. Setting it up explicitly is faster than letting
+      # Gradle provision one.
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      # Caches the Gradle distribution and dependency cache between runs.
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Verify formatting
+        run: ./gradlew spotlessCheck
+
+      - name: Build and test
+        run: ./gradlew build --no-daemon
+
+      # Publish results even when tests fail — that is exactly when you need them.
+      - name: Publish test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: '**/build/reports/tests/test/'
+          retention-days: 7
+
+      - name: Publish coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: '**/build/reports/jacoco/'
+          retention-days: 7
