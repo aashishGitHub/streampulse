@@ -63,8 +63,19 @@ coverage: ## Run tests and open the coverage report
 # estate for a unit test wastes ~10 GB of RAM and several minutes.
 # ---------------------------------------------------------------------------
 .PHONY: up-core
-up-core: ## Start Kafka + Postgres + Redis + Keycloak (Phase 2+)
+up-core: ## Start moto (Kinesis/S3/SQS) + Postgres + Redis + Keycloak
 	$(COMPOSE) --profile core up -d
+
+.PHONY: up-kafka
+up-kafka: ## Also start Kafka, for the `kafka` profile comparison (ADR-0008)
+	$(COMPOSE) --profile kafka up -d
+
+.PHONY: seed-aws
+seed-aws: ## Create the Kinesis stream in moto (no AWS account needed)
+	@AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1 \
+	 aws --endpoint-url=http://localhost:5001 kinesis create-stream \
+	     --stream-name telemetry-raw-v1 --shard-count 2 2>/dev/null \
+	  && echo "created stream telemetry-raw-v1" || echo "stream already exists"
 
 .PHONY: up-aws
 up-aws: ## Start moto (S3/SQS/Kinesis) + DynamoDB Local (Phase 4+)

@@ -121,6 +121,59 @@ tasks.withType<Test>().configureEach {
 
     maxHeapSize = "1g"
 
+    // -----------------------------------------------------------------------
+    // TESTCONTAINERS ON DOCKER DESKTOP FOR MAC
+    //
+    // Docker Desktop exposes SEVERAL unix sockets. The one the CLI uses —
+    // ~/.docker/run/docker.sock, which /var/run/docker.sock symlinks to — is a
+    // thin stub: hitting /info on it returns HTTP 400 with an all-empty body and
+    // a `com.docker.desktop.address` label pointing elsewhere. The CLI knows to
+    // follow that; docker-java (and therefore Testcontainers) does not, and
+    // reports the famously unhelpful "Could not find a valid Docker environment".
+    //
+    // The REAL engine socket is docker.raw.sock. Probing both makes the
+    // difference obvious:
+    //
+    //   docker-cli.sock  → {"ServerVersion":"", "NCPU":0, ...}   (stub)
+    //   docker.raw.sock  → {"ServerVersion":"29.5.3","NCPU":8}   (engine)
+    //
+    // So we point Testcontainers at the engine socket directly. Guarded three
+    // ways: only when the file exists, only when DOCKER_HOST is not already set
+    // (never override a deliberate choice), and it is a no-op on Linux and in CI
+    // where /var/run/docker.sock is the real thing.
+    //
+    // VERIFY: this is a Docker Desktop layout detail and may change between
+    // versions. If Testcontainers stops finding Docker, re-probe the sockets.
+    // -----------------------------------------------------------------------
+    if (System.getenv("DOCKER_HOST") == null) {
+        val dockerDesktopSocket = File(System.getProperty("user.home"), "Library/Containers/com.docker.docker/Data/docker.raw.sock")
+        if (dockerDesktopSocket.exists()) {
+            environment("DOCKER_HOST", "unix://${dockerDesktopSocket.absolutePath}")
+
+            // docker-java (bundled with Testcontainers) negotiates Docker API 1.32 by
+            // default. Docker Engine 29.x REJECTS it outright:
+            //
+            //   400 "client version 1.32 is too old. Minimum supported API version is 1.40"
+            //
+            // The engine here reports ApiVersion 1.54, MinAPIVersion 1.40. Pinning 1.44
+            // sits comfortably inside that range and is old enough to be widely supported,
+            // so it also works on the older engines a colleague or CI runner might have.
+            //
+            // VERIFY when upgrading: once Testcontainers ships a docker-java that
+            // negotiates a modern version, this pin becomes unnecessary and should be
+            // removed rather than left to rot.
+            environment("DOCKER_API_VERSION", "1.44")
+            // docker-java reads the negotiated version from the `api.version` SYSTEM
+            // PROPERTY; the DOCKER_API_VERSION environment variable above is honoured by the
+            // docker CLI but not reliably by the Java client, so both are set.
+            systemProperty("api.version", "1.44")
+
+            // Ryuk is the sidecar that reaps containers when this JVM exits. It mounts the
+            // socket by the path the ENGINE knows, which is the standard location.
+            environment("TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE", "/var/run/docker.sock")
+        }
+    }
+
     // Coverage is produced after every test run, so `./gradlew test` always
     // leaves a usable report behind at build/reports/jacoco/.
     finalizedBy(tasks.named("jacocoTestReport"))

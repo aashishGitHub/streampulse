@@ -1,0 +1,126 @@
+# ============================================================================
+#  ingest-gateway configuration
+#
+#  Every value here is a decision. Where a default would be wrong or surprising,
+#  the comment says why.
+# ============================================================================
+
+spring:
+  application:
+    name: ingest-gateway
+
+  threads:
+    virtual:
+      # Java 21 virtual threads for request handling. This workload blocks on Kafka
+      # and Redis, so a blocked virtual thread unmounts instead of holding an OS
+      # thread — concurrency is bounded by memory, not by a pool size someone guessed.
+      # ADR-0006 records why this rather than WebFlux.
+      enabled: true
+
+  lifecycle:
+    # Upper bound on each SmartLifecycle shutdown phase (BS-01 / REQ-LC-02).
+    # Kubernetes terminationGracePeriodSeconds must exceed the TOTAL across phases.
+    timeout-per-shutdown-phase: 25s
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      timeout: 500ms          # a slow Redis must not become a slow ingest; we fail open
+      lettuce:
+        pool:
+          max-active: 16
+          max-wait: 200ms
+
+  # Kafka is only used under the "kafka" profile (ADR-0008). Kinesis is the default.
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.ByteArraySerializer
+      properties:
+        # --- delivery guarantees: these three are correctness, not tuning ---
+        enable.idempotence: true      # PID + sequence numbers: a producer retry cannot
+                                      # duplicate or reorder a record
+        acks: all                     # every in-sync replica must have it before we ack
+        max.in.flight.requests.per.connection: 5
+                                      # must stay at or below the idempotence limit, or the
+                                      # broker cannot deduplicate within its window.
+                                      # VERIFY the exact limit in current Kafka docs.
+
+        # --- throughput: latency traded for batching. Phase 9 tunes these with numbers ---
+        linger.ms: 20                 # wait up to 20ms to fill a batch
+        batch.size: 65536             # 64 KB
+        compression.type: lz4         # fast; zstd compresses harder but costs more CPU
+
+        # --- timeouts ---
+        delivery.timeout.ms: 120000   # TOTAL budget send→ack, INCLUDING retries
+        request.timeout.ms: 30000     # one attempt; must be <= delivery.timeout.ms
+
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful                  # let in-flight requests finish before the JVM exits
+
+# ---------------------------------------------------------------------------
+# Actuator. Liveness and readiness are DIFFERENT questions and must not share a
+# probe:
+#   readiness = "can I serve traffic right now?"  → includes dependencies
+#   liveness  = "am I broken beyond recovery?"    → must NOT include dependencies
+#
+# Pointing liveness at a dependency check is a classic outage amplifier: Redis
+# blips, every pod fails liveness, Kubernetes restarts them all, and now you have
+# a cold cache on top of the original problem.
+# ---------------------------------------------------------------------------
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: always            # local only; production would be when-authorized
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+# ---------------------------------------------------------------------------
+# Our own settings. Typed and validated in IngestProperties, so a missing or
+# out-of-range value fails at STARTUP — the pod never passes readiness — rather
+# than on the first request that happens to touch it.
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# AWS. Locally every client is pointed at moto — a fake AWS API in a container.
+# Credentials are the literal string "test": NOTHING reaches AWS and no account
+# is needed. In a real deployment endpoint-override is absent and the SDK
+# resolves credentials normally (env, profile, instance role).
+#
+# What this does NOT prove: moto implements the API surface, not the service.
+# No IAM enforcement, no throttling, meaningless latency. See ADR-0003.
+# ---------------------------------------------------------------------------
+streampulse:
+  aws:
+    endpoint-override: ${AWS_ENDPOINT_OVERRIDE:http://localhost:5001}
+    region: ${AWS_REGION:us-east-1}
+    kinesis-stream-name: ${KINESIS_STREAM:telemetry-raw-v1}
+
+  ingest:
+    raw-topic: telemetry.raw.v1
+    max-batch-size: 500               # matches api/openapi/ingest-v1.yaml
+    max-in-flight-batches: 64         # the backpressure bound (REQ-IG-19)
+    permit-wait: 250ms                # how long to wait for a permit before 503
+    idempotency-ttl: 24h              # dedup keys expire, or the set grows forever
+    fail-open-on-idempotency-error: true
+                                      # Redis down ⇒ publish anyway and count it.
+                                      # At-least-once with duplicates beats losing
+                                      # telemetry. Deliberate trade; see ADR-0007.
+
+logging:
+  level:
+    com.streampulse: DEBUG

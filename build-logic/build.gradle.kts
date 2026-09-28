@@ -35,4 +35,10 @@ dependencies {
     // directly. This is a BUILD-TIME dependency of the build itself — it never
     // reaches any module's compile or runtime classpath.
     implementation(libs.avro.compiler)
+
+    // Spring's Gradle plugins, so the spring-service convention plugin can apply them.
+    // Same marker-artifact rule as Spotless: an `id(...)` inside a convention plugin needs
+    // the plugin's artifact on build-logic's compile classpath.
+    implementation(libs.springboot.plugin)
+    implementation(libs.springdepmgmt.plugin)
 }

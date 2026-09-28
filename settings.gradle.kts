@@ -69,3 +69,4 @@ dependencyResolutionManagement {
 // ---------------------------------------------------------------------------
 include("libs:platform")
 include("libs:contracts")
+include("services:ingest-gateway")
