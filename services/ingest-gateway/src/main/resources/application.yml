@@ -117,6 +117,14 @@ streampulse:
     permit-wait: 250ms                # how long to wait for a permit before 503
     idempotency-ttl: 24h              # dedup keys expire, or the set grows forever
     fail-open-on-idempotency-error: true
+    # Per-tenant admission control (REQ-IG-20). Capacity is the burst a tenant may send;
+    # refill is the sustained rate. A fixed window would allow a double burst across the
+    # boundary; a token bucket caps the spike and the long-run rate separately.
+    quota-capacity: 10000
+    quota-refill-per-second: 2000
+    # Bounded drain on SIGTERM. Must be well under Kubernetes terminationGracePeriodSeconds
+    # (Phase 11 sets 45s), or the pod is killed mid-drain and the ordering buys nothing.
+    drain-timeout: 20s
                                       # Redis down ⇒ publish anyway and count it.
                                       # At-least-once with duplicates beats losing
                                       # telemetry. Deliberate trade; see ADR-0007.

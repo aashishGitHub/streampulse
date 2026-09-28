@@ -272,3 +272,105 @@ keeps generated code inside the "no `java.util.Date`" architecture rule for free
 
 Phase 2 — ingest gateway. Spring Boot enters the build for the first time, which is also
 where the Gradle 9 / Spring Boot plugin compatibility risk gets tested in isolation.
+
+---
+
+## Phase 2 (continued) — security, quotas, graceful drain · 2026-09-29 · ⚠️ partially verified
+
+### What landed
+
+Closing the gaps left open when Phase 2 first shipped a working vertical slice.
+
+**Security (REQ-IG-07/08/09).** Spring Security OAuth2 resource server. The tenant now comes
+from a verified JWT claim via `TenantResolver`, never from a header or the body. The defence
+is structural: `EventDto` has no tenant field at all, so there is nothing to accidentally
+trust. CSRF is disabled with a stated reason — bearer tokens are not attached automatically
+by the browser, so there is nothing for an attacker to ride on. That answer changes the
+moment this service authenticates with a cookie.
+
+**Per-tenant quotas (REQ-IG-20).** A token bucket in Redis, consumed by a Lua script.
+
+Why Lua rather than three Redis calls:
+
+```
+❌  tokens = GET bucket      both replicas read 5
+    if (tokens >= 3)          both decide yes
+    SET bucket (tokens - 3)   both write 2 — six tokens spent from a budget of five
+```
+
+Redis runs a script atomically, so read-decide-write becomes one indivisible operation. Same
+insight as `SET NX EX` for idempotency: the fix for a check-then-act race is not a faster
+check, it is making the whole thing one operation.
+
+Deliberately NOT Resilience4j's RateLimiter, which is per-JVM: with four replicas a "1000/s"
+limit silently becomes 4000/s and changes every time you scale. A tenant quota is a business
+fact, so it lives somewhere shared.
+
+**429 vs 503.** Kept distinct because a good client reacts differently: 429 means *your*
+quota is gone and retrying elsewhere will not help; 503 means *we* are saturated and another
+instance may cope.
+
+**Graceful drain (BS-01 / REQ-IG-27).** `IngestDrainLifecycle` at `SmartLifecycle` phase 100.
+Phases stop in descending order, so readiness flips to `REFUSING_TRAFFIC` first, the HTTP
+connector stops next, and only then do we wait for in-flight batches. The permits *are* the
+in-flight count, so "all permits returned" is the drain condition. A timeout logs at ERROR
+rather than passing silently — that is the case where a deploy can actually lose work.
+
+### Verified
+
+```
+$ ./gradlew :services:ingest-gateway:test --tests '*IngestServiceTest*' \
+            :libs:platform:test :libs:contracts:test
+82 tests passing
+```
+
+Including three new quota tests. The one worth naming:
+
+```
+per-tenant quota > a rejected batch leaves the in-flight permits untouched   PASSED
+```
+
+That asserts the quota check runs **before** acquiring a permit. If it ran after, a throttled
+tenant would consume capacity that healthy tenants need — turning their problem into
+everyone's.
+
+### NOT verified — Docker Desktop became unresponsive
+
+The security integration tests are **written but unrun**. Mid-session the Docker daemon
+stopped responding:
+
+```
+$ timeout 10 docker info
+NO - daemon unresponsive          # hung, no containers, no error
+
+$ ps -p 54187 -o etime=
+20:10                             # the test task sat at :services:ingest-gateway:test
+                                  # for 20 minutes with nothing to show
+```
+
+The eight tests added to `IngestEndToEndIT` — missing token, garbage token, **expired**
+token, token with no tenant claim, and the body-cannot-override-the-tenant test — have
+therefore never executed. They are committed unverified, and this note exists so nobody
+mistakes "committed" for "passing".
+
+To run them once Docker Desktop is restarted:
+
+```bash
+./gradlew :services:ingest-gateway:test --tests '*IngestEndToEndIT*'
+```
+
+The most important of the eight is `bodyCannotOverrideTheTenant`: a caller authenticated as
+`streamflix` sends a body also claiming `tenantId: sportsnow`, and the record must still be
+written as `streamflix`.
+
+### Still outstanding in Phase 2
+
+Honest scope:
+
+- **Resilience4j** — the dependency is declared but no circuit breaker or time limiter is
+  applied to the publisher yet (REQ-IG-21).
+- **gRPC adapter** — BS-09 / REQ-GR-01…07 not started.
+- **Keycloak** — tests use a symmetric-key `JwtDecoder` under a test profile. That proves
+  expiry, signature and the tenant claim are checked; it does **not** prove Keycloak's JWKS
+  rotation, issuer or audience validation. Those need the real issuer.
+- **Actuator health groups** — configured in `application.yml`, never asserted by a test.

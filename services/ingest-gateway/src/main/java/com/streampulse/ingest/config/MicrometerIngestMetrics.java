@@ -30,6 +30,7 @@ public class MicrometerIngestMetrics implements IngestMetrics {
     private final Counter published;
     private final Counter duplicates;
     private final Counter rejectedForCapacity;
+    private final Counter rejectedForQuota;
     private final Counter idempotencyUnavailable;
     private final Counter publishFailures;
 
@@ -51,6 +52,11 @@ public class MicrometerIngestMetrics implements IngestMetrics {
 
         // The SLI for BS-04's degraded-dependency scenario: when this rises, deduplication
         // is off and the pipeline is running at-least-once without protection.
+        this.rejectedForQuota = Counter.builder("streampulse.ingest.events.throttled")
+                .description("Events refused because the TENANT exceeded its quota (429, not 503)")
+                .baseUnit("events")
+                .register(registry);
+
         this.idempotencyUnavailable = Counter.builder("streampulse.ingest.idempotency.unavailable")
                 .description("Times the dedup store was unreachable and we failed open")
                 .register(registry);
@@ -73,6 +79,11 @@ public class MicrometerIngestMetrics implements IngestMetrics {
     @Override
     public void recordRejectedForCapacity(int count) {
         rejectedForCapacity.increment(count);
+    }
+
+    @Override
+    public void recordRejectedForQuota(int count) {
+        rejectedForQuota.increment(count);
     }
 
     @Override

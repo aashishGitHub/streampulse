@@ -18,7 +18,10 @@ dependencies {
 
     implementation(libs.spring.boot.starter.web) // Spring MVC (not WebFlux — see ADR-0006)
     implementation(libs.spring.boot.starter.validation) // Bean Validation on request bodies
-    implementation(libs.spring.boot.starter.data.redis) // idempotency claims
+    implementation(libs.spring.boot.starter.data.redis) // idempotency claims + rate-limit buckets
+    implementation(libs.spring.boot.starter.security)
+    implementation(libs.spring.boot.starter.oauth2.rs) // JWT bearer tokens
+    implementation(libs.resilience4j.spring.boot3)
     // ---- the event backbone ----
     // Kinesis is the DEFAULT path (AWS-native, and moto fakes it locally for free).
     // Kafka is a second adapter behind a profile — open source, free, and the comparison
@@ -33,6 +36,7 @@ dependencies {
     testImplementation(libs.testcontainers.junit)
     testImplementation(libs.testcontainers.kafka)
     testImplementation(libs.awaitility)
+    testImplementation(libs.spring.security.test)
 }
 
 // ---------------------------------------------------------------------------

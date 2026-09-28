@@ -28,6 +28,9 @@ public interface IngestMetrics {
 
     void recordRejectedForCapacity(int count);
 
+    /** Rejected because the TENANT exceeded its quota — distinct from our own saturation. */
+    void recordRejectedForQuota(int count);
+
     void recordIdempotencyUnavailable();
 
     void recordPublishFailure();
@@ -43,6 +46,9 @@ public interface IngestMetrics {
 
             @Override
             public void recordRejectedForCapacity(int count) {}
+
+            @Override
+            public void recordRejectedForQuota(int count) {}
 
             @Override
             public void recordIdempotencyUnavailable() {}

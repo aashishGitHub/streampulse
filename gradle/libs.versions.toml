@@ -103,6 +103,7 @@ spring-boot-starter-test       = { module = "org.springframework.boot:spring-boo
 # straight into Spring properties. Boot 3.1+. Without it you hand-write @DynamicPropertySource
 # for every single property.
 spring-boot-testcontainers     = { module = "org.springframework.boot:spring-boot-testcontainers" }
+spring-security-test           = { module = "org.springframework.security:spring-security-test" }
 spring-kafka                   = { module = "org.springframework.kafka:spring-kafka" }
 spring-kafka-test              = { module = "org.springframework.kafka:spring-kafka-test" }
 micrometer-prometheus          = { module = "io.micrometer:micrometer-registry-prometheus" }

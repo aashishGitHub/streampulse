@@ -5,6 +5,7 @@ package com.streampulse.ingest.application;
 import com.streampulse.ingest.domain.EventPublisher;
 import com.streampulse.ingest.domain.IdempotencyStore;
 import com.streampulse.ingest.domain.IngestCommand;
+import com.streampulse.ingest.domain.RateLimiter;
 import com.streampulse.platform.domain.EventId;
 import com.streampulse.platform.domain.TenantId;
 import java.util.ArrayList;
@@ -98,11 +99,41 @@ final class FakeAdapters {
         }
     }
 
+    /**
+     * Rate limiter with a real, finite budget.
+     *
+     * <p>A fake rather than a mock again: it genuinely runs out, so the test exercises the
+     * rejection path instead of asserting that a stub returned what it was told to.
+     */
+    static final class FakeRateLimiter implements RateLimiter {
+        private final AtomicInteger remaining;
+
+        FakeRateLimiter(int budget) {
+            this.remaining = new AtomicInteger(budget);
+        }
+
+        @Override
+        public boolean tryConsume(TenantId tenant, int permits) {
+            // Atomic compare-and-set, matching the real Lua script's semantics: it must be
+            // impossible for two callers to both spend the last token.
+            while (true) {
+                int current = remaining.get();
+                if (current < permits) {
+                    return false;
+                }
+                if (remaining.compareAndSet(current, current - permits)) {
+                    return true;
+                }
+            }
+        }
+    }
+
     /** Counting metrics, so tests can assert a degradation was actually reported. */
     static final class CountingMetrics implements IngestMetrics {
         final AtomicInteger published = new AtomicInteger();
         final AtomicInteger duplicates = new AtomicInteger();
         final AtomicInteger rejected = new AtomicInteger();
+        final AtomicInteger throttled = new AtomicInteger();
         final AtomicInteger idempotencyUnavailable = new AtomicInteger();
         final AtomicInteger publishFailures = new AtomicInteger();
 
@@ -119,6 +150,11 @@ final class FakeAdapters {
         @Override
         public void recordRejectedForCapacity(int count) {
             rejected.addAndGet(count);
+        }
+
+        @Override
+        public void recordRejectedForQuota(int count) {
+            throttled.addAndGet(count);
         }
 
         @Override

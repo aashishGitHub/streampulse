@@ -6,12 +6,16 @@ import com.streampulse.ingest.adapter.out.kafka.AvroEventMapper;
 import com.streampulse.ingest.adapter.out.kafka.KafkaEventPublisher;
 import com.streampulse.ingest.adapter.out.kinesis.KinesisEventPublisher;
 import com.streampulse.ingest.adapter.out.redis.RedisIdempotencyStore;
+import com.streampulse.ingest.adapter.out.redis.RedisTokenBucketRateLimiter;
 import com.streampulse.ingest.application.IngestMetrics;
 import com.streampulse.ingest.application.IngestService;
 import com.streampulse.ingest.application.IngestUseCase;
 import com.streampulse.ingest.domain.EventPublisher;
 import com.streampulse.ingest.domain.IdempotencyStore;
+import com.streampulse.ingest.domain.RateLimiter;
+import com.streampulse.ingest.lifecycle.IngestDrainLifecycle;
 import io.micrometer.core.instrument.MeterRegistry;
+import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
@@ -81,16 +85,41 @@ class IngestConfig {
     }
 
     @Bean
+    RateLimiter rateLimiter(StringRedisTemplate redis, IngestProperties props) {
+        return new RedisTokenBucketRateLimiter(
+                redis,
+                props.quotaCapacity(),
+                props.quotaRefillPerSecond(),
+                props.idempotencyTtl().toSeconds(),
+                props.failOpenOnIdempotencyError());
+    }
+
+    @Bean
     IngestMetrics ingestMetrics(MeterRegistry registry) {
         return new MicrometerIngestMetrics(registry);
     }
 
     @Bean
+    IngestDrainLifecycle ingestDrainLifecycle(
+            IngestUseCase useCase, ApplicationContext context, IngestProperties props) {
+        // The cast is safe: ingestUseCase() below always returns an IngestService. It is
+        // here rather than in the signature so the port stays the type everything else
+        // depends on — only the drain needs the implementation's permit count.
+        return new IngestDrainLifecycle(
+                (IngestService) useCase, context, props.maxInFlightBatches(), props.drainTimeout());
+    }
+
+    @Bean
     IngestUseCase ingestUseCase(
-            EventPublisher publisher, IdempotencyStore store, IngestMetrics metrics, IngestProperties props) {
+            EventPublisher publisher,
+            IdempotencyStore store,
+            RateLimiter rateLimiter,
+            IngestMetrics metrics,
+            IngestProperties props) {
         return new IngestService(
                 publisher,
                 store,
+                rateLimiter,
                 metrics,
                 props.maxInFlightBatches(),
                 props.permitWait(),

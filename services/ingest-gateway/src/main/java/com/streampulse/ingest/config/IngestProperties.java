@@ -56,4 +56,21 @@ public record IngestProperties(
          * aggregation tolerates duplicates while a gap is unrecoverable. For a payments
          * system the correct value is false. ADR-0007.
          */
-        boolean failOpenOnIdempotencyError) {}
+        boolean failOpenOnIdempotencyError,
+
+        /**
+         * Token-bucket capacity: the largest BURST a tenant may send. Independent of the
+         * sustained rate below — two dials, each meaning something distinct.
+         */
+        @Min(1) long quotaCapacity,
+
+        /** Sustained events per second per tenant, once the burst budget is spent. */
+        @Min(1) long quotaRefillPerSecond,
+
+        /**
+         * How long to wait for in-flight batches on shutdown (BS-01 / REQ-LC-02).
+         *
+         * <p>Must be comfortably less than Kubernetes' {@code terminationGracePeriodSeconds},
+         * or the pod is SIGKILLed mid-drain and the ordering buys nothing.
+         */
+        @NotNull Duration drainTimeout) {}

@@ -7,6 +7,8 @@ import com.streampulse.ingest.domain.EventPublisher;
 import com.streampulse.ingest.domain.IdempotencyStore;
 import com.streampulse.ingest.domain.IngestCommand;
 import com.streampulse.ingest.domain.IngestResult;
+import com.streampulse.ingest.domain.QuotaExceededException;
+import com.streampulse.ingest.domain.RateLimiter;
 import com.streampulse.platform.domain.EventId;
 import java.time.Duration;
 import java.util.HashSet;
@@ -57,7 +59,15 @@ public class IngestService implements IngestUseCase {
 
     private final EventPublisher publisher;
     private final IdempotencyStore idempotencyStore;
+    private final RateLimiter rateLimiter;
     private final IngestMetrics metrics;
+
+    /**
+     * How long a client should wait after a 429. One second is a starting point, not a
+     * measurement: the client MUST add jitter, or every throttled client returns at the
+     * same instant and the next spike is worse than the first.
+     */
+    private static final Duration RETRY_AFTER_QUOTA = Duration.ofSeconds(1);
 
     /** Bounds how many batches may be in flight. THE backpressure mechanism (REQ-IG-19). */
     private final Semaphore inFlight;
@@ -68,12 +78,14 @@ public class IngestService implements IngestUseCase {
     public IngestService(
             EventPublisher publisher,
             IdempotencyStore idempotencyStore,
+            RateLimiter rateLimiter,
             IngestMetrics metrics,
             int maxInFlightBatches,
             Duration permitWait,
             boolean failOpenOnIdempotencyError) {
         this.publisher = publisher;
         this.idempotencyStore = idempotencyStore;
+        this.rateLimiter = rateLimiter;
         this.metrics = metrics;
         // Fair = true: permits are granted in arrival order. Slightly slower than an unfair
         // semaphore, but it prevents a request being starved indefinitely under sustained
@@ -85,6 +97,16 @@ public class IngestService implements IngestUseCase {
 
     @Override
     public IngestResult ingest(IngestCommand command) {
+        // ---- 0. QUOTA, before anything expensive ----
+        // Checked first, deliberately. A tenant over its limit should cost us a single
+        // Redis round trip, not a permit, a dedup claim and a publish. Admission control
+        // that runs late is admission control that does not protect you.
+        if (!rateLimiter.tryConsume(command.tenantId(), command.size())) {
+            metrics.recordRejectedForQuota(command.size());
+            throw new QuotaExceededException(
+                    "tenant " + command.tenantId() + " exceeded its ingest quota", RETRY_AFTER_QUOTA);
+        }
+
         boolean acquired;
         try {
             acquired = inFlight.tryAcquire(permitWait.toMillis(), TimeUnit.MILLISECONDS);

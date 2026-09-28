@@ -5,6 +5,7 @@ package com.streampulse.ingest.adapter;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.streampulse.contracts.v1.TelemetryEvent;
+import com.streampulse.ingest.support.TestJwtSupport;
 import java.net.URI;
 import java.util.List;
 import java.util.UUID;
@@ -60,6 +61,7 @@ import software.amazon.awssdk.services.kinesis.model.ShardIteratorType;
  * production by a policy moto never saw. ADR-0003.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@org.springframework.context.annotation.Import(TestJwtSupport.class)
 @Testcontainers
 class IngestEndToEndIT {
 
@@ -121,10 +123,17 @@ class IngestEndToEndIT {
                 .formatted(eventId, sessionId);
     }
 
+    /** Posts with a valid token whose `tenant` claim is {@code tenant}. */
     private ResponseEntity<String> postBatch(String tenant, String... events) {
+        return postWithToken(TestJwtSupport.tokenFor(tenant), events);
+    }
+
+    private ResponseEntity<String> postWithToken(String token, String... events) {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
-        headers.add("X-Tenant-Id", tenant);
+        if (token != null) {
+            headers.setBearerAuth(token);
+        }
         String body = "{\"events\":[" + String.join(",", events) + "]}";
         return rest.postForEntity("/v1/events:batch", new HttpEntity<>(body, headers), String.class);
     }
@@ -276,12 +285,82 @@ class IngestEndToEndIT {
     }
 
     @Test
-    @DisplayName("a malformed tenant id is rejected before anything is published")
+    @DisplayName("a malformed tenant claim is rejected before anything is published")
     void malformedTenantIsRejected() {
         ResponseEntity<String> response =
                 postBatch("BAD TENANT/NAME", eventJson(UUID.randomUUID().toString(), "sess-1"));
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+    }
+
+    // ---------------- security ----------------
+
+    @Test
+    @DisplayName("no token is rejected with 401")
+    void missingTokenIsUnauthorized() {
+        ResponseEntity<String> response =
+                postWithToken(null, eventJson(UUID.randomUUID().toString(), "sess-1"));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+    }
+
+    @Test
+    @DisplayName("a garbage token is rejected with 401")
+    void invalidTokenIsUnauthorized() {
+        ResponseEntity<String> response =
+                postWithToken("not.a.jwt", eventJson(UUID.randomUUID().toString(), "sess-1"));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+    }
+
+    @Test
+    @DisplayName("an EXPIRED token is rejected — expiry is actually checked")
+    void expiredTokenIsUnauthorized() {
+        // Worth asserting explicitly: a decoder misconfigured to skip expiry validation
+        // looks completely healthy until someone replays an old token.
+        ResponseEntity<String> response = postWithToken(
+                TestJwtSupport.expiredTokenFor("streamflix"),
+                eventJson(UUID.randomUUID().toString(), "sess-1"));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+    }
+
+    @Test
+    @DisplayName("a valid token with NO tenant claim fails closed")
+    void tokenWithoutTenantClaimIsRejected() {
+        // Signature valid, issuer fine, not expired — but no tenant. Guessing a default
+        // here would silently write one customer's data into another's namespace.
+        ResponseEntity<String> response = postWithToken(
+                TestJwtSupport.tokenWithoutTenant(), eventJson(UUID.randomUUID().toString(), "sess-1"));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+
+    @Test
+    @DisplayName("the BODY cannot override the tenant — the token wins")
+    void bodyCannotOverrideTheTenant() throws Exception {
+        // THE multi-tenancy test. A caller authenticated as `streamflix` sends a body that
+        // also claims `tenantId: sportsnow`. The event must still be written as streamflix,
+        // because the DTO has no tenant field at all — there is nothing to trust.
+        String eventId = UUID.randomUUID().toString();
+        String sessionId = "sess-" + UUID.randomUUID();
+        String maliciousEvent =
+                """
+                {"eventId":"%s","sessionId":"%s","tenantId":"sportsnow","titleId":"t",
+                 "deviceType":"WEB","region":"us-east-1",
+                 "occurredAt":"2026-01-15T12:00:00Z","type":"HEARTBEAT"}"""
+                        .formatted(eventId, sessionId);
+
+        assertThat(postBatch("streamflix", maliciousEvent).getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+
+        Record ours = drainStream().stream()
+                .filter(r -> r.partitionKey().equals(sessionId))
+                .findFirst()
+                .orElseThrow();
+
+        assertThat(deserialize(ours).getTenantId())
+                .as("the tenant must come from the verified token, never the request body")
+                .hasToString("streamflix");
     }
 
     @Test

@@ -3,6 +3,7 @@
 package com.streampulse.ingest.adapter.in.rest;
 
 import com.streampulse.ingest.domain.BackpressureException;
+import com.streampulse.ingest.domain.QuotaExceededException;
 import java.net.URI;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -65,6 +66,25 @@ class IngestExceptionHandler {
         log.debug("Rejected for capacity, retry after {}s", seconds);
 
         return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .headers(headers)
+                .body(problem);
+    }
+
+    /** Quota exhausted: the tenant's own limit, not our capacity. */
+    @ExceptionHandler(QuotaExceededException.class)
+    ResponseEntity<ProblemDetail> handleQuotaExceeded(QuotaExceededException e) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.TOO_MANY_REQUESTS, "Tenant quota exceeded");
+        problem.setType(URI.create(PROBLEM_BASE + "quota-exceeded"));
+        problem.setTitle("Quota exceeded");
+
+        long seconds = Math.max(1, e.retryAfter().toSeconds());
+        HttpHeaders headers = new HttpHeaders();
+        headers.add(HttpHeaders.RETRY_AFTER, String.valueOf(seconds));
+
+        // DEBUG: a throttled tenant is the system working, not failing.
+        log.debug("Throttled: {}", e.getMessage());
+
+        return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
                 .headers(headers)
                 .body(problem);
     }

@@ -8,9 +8,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.streampulse.ingest.application.FakeAdapters.CountingMetrics;
 import com.streampulse.ingest.application.FakeAdapters.FakeIdempotencyStore;
 import com.streampulse.ingest.application.FakeAdapters.FakePublisher;
+import com.streampulse.ingest.application.FakeAdapters.FakeRateLimiter;
 import com.streampulse.ingest.domain.BackpressureException;
 import com.streampulse.ingest.domain.IngestCommand;
 import com.streampulse.ingest.domain.IngestResult;
+import com.streampulse.ingest.domain.QuotaExceededException;
+import com.streampulse.ingest.domain.RateLimiter;
 import com.streampulse.platform.domain.EventId;
 import com.streampulse.platform.domain.TenantId;
 import java.time.Duration;
@@ -49,7 +52,11 @@ class IngestServiceTest {
     }
 
     private IngestService service(int maxInFlight, Duration permitWait) {
-        return new IngestService(publisher, store, metrics, maxInFlight, permitWait, true);
+        return service(maxInFlight, permitWait, RateLimiter.allowAll());
+    }
+
+    private IngestService service(int maxInFlight, Duration permitWait, RateLimiter limiter) {
+        return new IngestService(publisher, store, limiter, metrics, maxInFlight, permitWait, true);
     }
 
     private IngestService service() {
@@ -241,12 +248,64 @@ class IngestServiceTest {
         @DisplayName("fail-closed mode refuses instead, when configured")
         void failClosedRefuses() {
             store.unavailable = true;
-            var strict = new IngestService(publisher, store, metrics, 8, Duration.ofMillis(200), /* failOpen= */ false);
+            var strict = new IngestService(
+                    publisher,
+                    store,
+                    RateLimiter.allowAll(),
+                    metrics,
+                    8,
+                    Duration.ofMillis(200),
+                    /* failOpen= */ false);
 
             assertThatThrownBy(() -> strict.ingest(batchOf(2)))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining("fail-open is disabled");
             assertThat(publisher.published).isEmpty();
+        }
+    }
+
+    @Nested
+    @DisplayName("per-tenant quota — 429, distinct from 503")
+    class Quota {
+
+        @Test
+        @DisplayName("exceeding the quota throws before anything is published")
+        void quotaRejectionHappensFirst() {
+            // The rejection must cost ONE cheap check, not a permit, a dedup claim and a
+            // publish. Admission control that runs late does not protect you.
+            IngestService svc = service(8, Duration.ofMillis(200), new FakeRateLimiter(3));
+
+            svc.ingest(batchOf(3)); // spends the whole budget
+
+            assertThatThrownBy(() -> svc.ingest(batchOf(1)))
+                    .isInstanceOf(QuotaExceededException.class)
+                    .hasMessageContaining("quota");
+
+            assertThat(publisher.published).hasSize(3); // nothing extra reached the stream
+            assertThat(metrics.throttled.get()).isEqualTo(1);
+        }
+
+        @Test
+        @DisplayName("a rejected batch leaves the in-flight permits untouched")
+        void quotaRejectionDoesNotConsumeAPermit() {
+            // If the quota check ran AFTER acquiring a permit, a throttled tenant would eat
+            // capacity that healthy tenants need — turning their problem into everyone's.
+            IngestService svc = service(4, Duration.ofMillis(200), new FakeRateLimiter(0));
+
+            assertThatThrownBy(() -> svc.ingest(batchOf(1))).isInstanceOf(QuotaExceededException.class);
+
+            assertThat(svc.availablePermits()).isEqualTo(4);
+        }
+
+        @Test
+        @DisplayName("QuotaExceededException carries a Retry-After")
+        void carriesRetryAfter() {
+            IngestService svc = service(8, Duration.ofMillis(200), new FakeRateLimiter(0));
+
+            assertThatThrownBy(() -> svc.ingest(batchOf(1)))
+                    .isInstanceOf(QuotaExceededException.class)
+                    .extracting(e -> ((QuotaExceededException) e).retryAfter())
+                    .isNotNull();
         }
     }
 

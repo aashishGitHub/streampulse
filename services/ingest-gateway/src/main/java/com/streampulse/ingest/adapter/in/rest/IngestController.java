@@ -15,6 +15,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
@@ -39,11 +40,13 @@ class IngestController {
     private static final Logger log = LoggerFactory.getLogger(IngestController.class);
 
     private final IngestUseCase ingest;
+    private final TenantResolver tenantResolver;
 
     // Constructor injection, no @Autowired: a single constructor is autowired implicitly,
     // the field is final, and the class is unit-testable with plain `new`.
-    IngestController(IngestUseCase ingest) {
+    IngestController(IngestUseCase ingest, TenantResolver tenantResolver) {
         this.ingest = ingest;
+        this.tenantResolver = tenantResolver;
     }
 
     @PostMapping(path = "/v1/events:batch", consumes = "application/json", produces = "application/json")
@@ -52,13 +55,12 @@ class IngestController {
             // Optional: per-event eventId already provides idempotency. This lets a client
             // short-circuit a whole retried batch without us deduplicating 500 ids one by one.
             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
-            // Phase 2a: the tenant is supplied by a header. Phase 2b replaces this with the
-            // verified JWT claim (REQ-IG-07). Marked so the temporary state is impossible to
-            // mistake for the finished design.
-            // TODO(REQ-IG-07): replace with the JWT `tenant` claim once security lands.
-            @RequestHeader("X-Tenant-Id") String tenantHeader) {
+            // The tenant comes from the VERIFIED token, never the body or a client-set
+            // header (REQ-IG-07/08). Spring Security has already validated the signature,
+            // issuer and expiry before this method runs.
+            Authentication authentication) {
 
-        TenantId tenant = TenantId.of(tenantHeader);
+        TenantId tenant = tenantResolver.resolve(authentication);
 
         IngestCommand command = new IngestCommand(tenant, toDomain(request.events()), Instant.now());
 
