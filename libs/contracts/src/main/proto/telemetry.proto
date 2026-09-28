@@ -1,0 +1,132 @@
+// ============================================================================
+//  telemetry.proto — the gRPC ingest contract (BS-09 / REQ-GR-01).
+//
+//  WHY THIS EXISTS ALONGSIDE THE REST CONTRACT
+//  -------------------------------------------
+//  A smart-TV SDK holds one connection open and emits a heartbeat every 10s per
+//  device. Over HTTP that is a TLS handshake, a set of headers and a JSON body
+//  per batch — overhead that dominates device CPU and battery when the payload
+//  is forty bytes of telemetry. gRPC replaces it with one HTTP/2 connection,
+//  binary framing, and a stream the server can ACK periodically.
+//
+//  WHY IT LIVES IN libs/contracts, NOT IN THE SERVICE
+//  --------------------------------------------------
+//  Exactly the reason the Avro schemas do: a contract with two sides belongs to
+//  neither of them. The OEM generates a client from this file; if it lived in
+//  ingest-gateway, every client would depend on the gateway's jar.
+//
+//  VERSIONING
+//  ----------
+//  The package carries the version (`streampulse.telemetry.v1`), so a v2 service
+//  can be served from the same process on the same port during a migration.
+//  Within v1 the protobuf rules apply: field NUMBERS are the contract, names are
+//  not. Never reuse a number; add fields, never renumber them.
+//
+//  VERIFY: `buf lint` and `buf breaking` are named in REQ-GR-01 and are NOT set
+//  up yet. Today the only gate is that protoc parses this file. See MILESTONES.
+// ============================================================================
+
+syntax = "proto3";
+
+package streampulse.telemetry.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// java_package deliberately differs from the Avro generated package
+// (com.streampulse.contracts.v1). Both contracts declare a type called
+// TelemetryEvent; putting them in one package would be a compile error, and
+// naming them differently would hide that they are the same concept in two wire
+// formats. Different package, same name, is the honest arrangement.
+option java_package = "com.streampulse.contracts.grpc.v1";
+option java_outer_classname = "TelemetryProto";
+option java_multiple_files = true;
+
+// ---------------------------------------------------------------------------
+//  THE SERVICE
+//
+//  Two RPCs on purpose, because they answer different questions:
+//
+//    StreamEvents  bidirectional stream. The long-lived connection the OEM
+//                  asked for. Client pushes events; server pushes periodic ACKs
+//                  carrying the last sequence it has made durable, so the client
+//                  knows what it may drop from its local buffer.
+//
+//    SendBatch     plain unary. The same semantics as POST /v1/events:batch, for
+//                  a client that cannot hold a connection open (a constrained
+//                  device, a lambda, a test). Having it here is what makes the
+//                  REST-vs-gRPC comparison in ADR-0010 an apples-to-apples one:
+//                  same work, same use case, different framing.
+// ---------------------------------------------------------------------------
+service TelemetryIngest {
+
+  // Bidi stream. NOT request/response: the two directions are independent, so
+  // an ACK for batch N may arrive while the client is already sending N+2.
+  rpc StreamEvents(stream TelemetryEvent) returns (stream Ack);
+
+  // Unary. Same use case, same validation, same idempotency — see
+  // ProtocolParityTest, which asserts that byte-for-byte.
+  rpc SendBatch(Batch) returns (BatchAck);
+}
+
+// ---------------------------------------------------------------------------
+//  MESSAGES
+// ---------------------------------------------------------------------------
+
+message TelemetryEvent {
+  // NOTE WHAT IS ABSENT: there is no tenant_id field, and that is a security
+  // control, not an oversight. The tenant comes from the verified JWT in the
+  // call metadata (REQ-IG-08, REQ-GR-05). If the message carried one, any
+  // authenticated caller could write into any tenant — the worst failure a
+  // multi-tenant system has. The safest way to not trust a field is to not have
+  // one, and that rule is identical on the REST side (see IngestDtos).
+
+  string event_id = 1;    // a UUID; also the idempotency key
+  string session_id = 2;  // the partition key: all events of one viewing session in order
+  string title_id = 3;
+  string device_type = 4;
+  string region = 5;
+
+  // google.protobuf.Timestamp, not an int64 of millis. It is the well-known type
+  // every language maps to its own instant type, so an OEM writing Kotlin, Go or
+  // C++ gets a real timestamp rather than a number with a unit in a comment.
+  google.protobuf.Timestamp occurred_at = 6;
+
+  string type = 7;
+
+  // Client-assigned, monotonically increasing per stream. The server echoes the
+  // highest DURABLE one back in Ack.last_durable_sequence, which is what lets the
+  // client free its buffer. Without it an ACK says "some of what you sent is
+  // safe" and the client has to keep everything.
+  uint64 sequence = 8;
+}
+
+message Batch {
+  // Bounded by the server at streampulse.ingest.max-batch-size, the same limit the
+  // REST contract states. proto3 cannot express "at most 500" — repeated is just
+  // repeated — so the check has to live in the adapter either way.
+  repeated TelemetryEvent events = 1;
+}
+
+message Ack {
+  // Everything up to and including this sequence is durable in the event stream.
+  // The client may drop it. This is the whole point of a streaming protocol with
+  // acks rather than fire-and-forget.
+  uint64 last_durable_sequence = 1;
+
+  uint32 accepted = 2;
+
+  // Not an error. A non-zero count means the client retried and idempotency did
+  // its job — reporting it is how the client learns its retry was harmless.
+  uint32 duplicates = 3;
+
+  // True when the deduplication store was unreachable and we published anyway
+  // (fail-open, ADR-0007). The client is being told: this data is safe, but it
+  // may be duplicated downstream.
+  bool degraded = 4;
+}
+
+message BatchAck {
+  uint32 accepted = 1;
+  uint32 duplicates = 2;
+  bool degraded = 3;
+}

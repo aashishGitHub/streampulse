@@ -31,7 +31,26 @@ dependencies {
     implementation(libs.aws.netty.client)
     implementation(libs.spring.kafka)
 
+    // ---- the second inbound protocol (BS-09) ----
+    // The stubs themselves come from :libs:contracts, which exposes grpc-api/stub/protobuf
+    // as `api`. Two things it does NOT expose, because they are a SERVICE's choice and not a
+    // contract's:
+    //
+    //   grpc-netty-shaded  the transport. `runtimeOnly` on purpose — we name no Netty type,
+    //                      we only need a ServerProvider on the classpath for
+    //                      ServerBuilder.forPort() to find via the ServiceLoader. Making it
+    //                      `implementation` would invite someone to import a shaded class,
+    //                      and shaded classes are not API.
+    //   proto-google-common-protos  google.rpc.RetryInfo, which we put in error trailers.
+    //                      Compile-time type ⇒ declared explicitly, never leaned on as a
+    //                      transitive.
+    runtimeOnly(libs.grpc.netty.shaded)
+    implementation(libs.proto.google.common.protos)
+
     testImplementation(platform(libs.testcontainers.bom))
+    // An in-process gRPC server: real interceptors, real stubs, real flow control, no sockets
+    // and no port to collide with. See GrpcIngestInProcessTest.
+    testImplementation(libs.grpc.inprocess)
     testImplementation(libs.spring.boot.testcontainers)
     testImplementation(libs.testcontainers.junit)
     testImplementation(libs.testcontainers.kafka)

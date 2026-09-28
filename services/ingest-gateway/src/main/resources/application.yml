@@ -125,6 +125,22 @@ streampulse:
     # Bounded drain on SIGTERM. Must be well under Kubernetes terminationGracePeriodSeconds
     # (Phase 11 sets 45s), or the pod is killed mid-drain and the ordering buys nothing.
     drain-timeout: 20s
+
+    # gRPC ingest (BS-09). A SECOND protocol over the same use case, not a second service.
+    grpc:
+      # Its own port: a different protocol on a different connection, and in Kubernetes a
+      # different Service too, because long-lived HTTP/2 connections need L7 load balancing
+      # while REST is happy with L4. REQ-GR-07 and ADR-0010.
+      # 0 = let the OS choose, which is what the integration tests pass so that two test
+      # classes in one build cannot collide on a fixed port.
+      port: ${GRPC_PORT:9090}
+      # Events gathered per call into the use case — the ACK interval AND the inbound
+      # flow-control window, deliberately the same number so they cannot disagree.
+      # Explainable, not measured; Phase 9 replaces it.
+      stream-flush-size: 50
+      # Bounded, like the HTTP drain. drain-timeout (20s) + this + the HTTP graceful shutdown
+      # must all fit inside terminationGracePeriodSeconds, or the pod is SIGKILLed mid-drain.
+      shutdown-timeout: 10s
                                       # Redis down ⇒ publish anyway and count it.
                                       # At-least-once with duplicates beats losing
                                       # telemetry. Deliberate trade; see ADR-0007.

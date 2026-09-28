@@ -122,6 +122,35 @@ a real decision rather than a topic.
 - **REQ-IG-27** THE SYSTEM SHALL drain in order on SIGTERM per BS-01, and SHALL NOT
   acknowledge a batch it has not durably published.
 
+### A second protocol (BS-09)
+
+Copied from the plan when BS-09 was implemented. The smart-TV OEM user story above is what
+these serve, and the constraint that shapes all of them is REQ-GR-02: a second front door
+must not become a second set of rules.
+
+- **REQ-GR-01** A `.proto` in `libs/contracts` SHALL define
+  `rpc StreamEvents(stream TelemetryEvent) returns (stream Ack)` and
+  `rpc SendBatch(Batch) returns (BatchAck)`. `buf lint` and `buf breaking` SHALL run in CI.
+  — *proto done; buf NOT done, see MILESTONES.*
+- **REQ-GR-02** Both the gRPC and REST adapters SHALL call the same `IngestUseCase`, with an
+  ArchUnit test ensuring no business logic lives in the adapters. — *done, plus
+  `ProtocolParityTest`, which is the stronger statement.*
+- **REQ-GR-03** WHEN the client sets a deadline THE SYSTEM SHALL honour it, cancelling
+  downstream work on `Context` cancellation. Errors SHALL map: validation →
+  `INVALID_ARGUMENT`, quota → `RESOURCE_EXHAUSTED` with retry info in trailers, overload →
+  `UNAVAILABLE`, auth → `UNAUTHENTICATED`. — *done; cancellation is observable, not
+  pre-emptive — ADR-0010 states the limit.*
+- **REQ-GR-04** Server-side flow control SHALL use manual inbound flow control tied to the
+  same in-flight semaphore as REST. — *done via `disableAutoRequest()` + `request(n)` granted
+  only after the previous window is durable.*
+- **REQ-GR-05** A `ServerInterceptor` SHALL validate the JWT from metadata, and a tracing
+  interceptor SHALL propagate W3C trace context. — *JWT done; tracing deferred to Phase 8.*
+- **REQ-GR-06** A benchmark SHALL compare REST batch against gRPC stream on CPU, bytes and
+  p99, with results in the ADR. — *NOT done. Phase 9.*
+- **REQ-GR-07** THE SYSTEM's Kubernetes notes SHALL record that gRPC needs L7 load balancing,
+  with a client-side LB / service mesh option. — *documented in ADR-0010; nothing configured,
+  Phase 11 owns the manifests.*
+
 ---
 
 ## Non-functional requirements
@@ -158,3 +187,21 @@ a real decision rather than a topic.
 - [ ] Exceeding the tenant quota returns `429` + `Retry-After`
 - [ ] Redis down → events still publish, `idempotency.unavailable` metric increments
 - [ ] Verified output in `MILESTONES.md`
+
+### BS-09 — the second protocol
+
+- [x] The same event over REST, gRPC unary and gRPC streaming produces identical records
+      (`ProtocolParityTest`, proven by mutation)
+- [x] An `eventId` accepted over REST is reported as a duplicate over gRPC
+- [x] A gRPC call with no token, a garbage token, an expired token or a token without a
+      tenant claim is `UNAUTHENTICATED`
+- [x] A client deadline cancels the server-side `Context` (`GrpcDeadlineCancellationTest`)
+- [x] Quota → `RESOURCE_EXHAUSTED` with `RetryInfo`; saturation and publish failure →
+      `UNAVAILABLE`; bad input → `INVALID_ARGUMENT`; anything else → `INTERNAL` with no detail
+- [x] Streaming ACKs carry the last **durable** sequence, and a partial batch is flushed on
+      half-close
+- [x] ArchUnit forbids `io.grpc` and `com.google.protobuf` in `..domain..` / `..application..`
+- [ ] `buf lint` + `buf breaking` in CI (REQ-GR-01)
+- [ ] `ghz` benchmark: REST batch vs gRPC stream, CPU / bytes / p99 (REQ-GR-06)
+- [ ] W3C trace-context interceptor (REQ-GR-05, Phase 8)
+- [ ] L7 load balancing actually configured (REQ-GR-07, Phase 11)

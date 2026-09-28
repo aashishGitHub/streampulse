@@ -60,7 +60,12 @@ import software.amazon.awssdk.services.kinesis.model.ShardIteratorType;
  * (no real shard quotas), or latency. A call that succeeds here can still be denied in
  * production by a policy moto never saw. ADR-0003.
  */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(
+        webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+        // BS-09 added a gRPC listener that starts with the context. Port 0 lets the OS choose
+        // one, so this class cannot collide with the configured 9090 — whether that is taken
+        // by another test class or by something already running on the developer's machine.
+        properties = "streampulse.ingest.grpc.port=0")
 @org.springframework.context.annotation.Import(TestJwtSupport.class)
 @Testcontainers
 class IngestEndToEndIT {

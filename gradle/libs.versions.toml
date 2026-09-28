@@ -58,6 +58,16 @@ resilience4j      = "2.3.0"     # Circuit breaker, retry, rate limiter, bulkhead
 bucket4j          = "8.14.0"    # DISTRIBUTED token buckets over Redis (R4j's limiter is per-instance).
 awsSdk            = "2.46.7"    # AWS SDK v2. Runs against moto locally — no account, no credentials.
 
+# --- gRPC (Phase 2 / BS-09) ------------------------------------------------
+grpc              = "1.84.0"    # gRPC Java: the runtime AND the protoc plugin that generates the
+                                # stubs. One number drives both, so they cannot drift apart.
+protobuf          = "3.25.9"    # MUST match what grpc-protobuf depends on. Read out of
+                                # grpc-protobuf-1.84.0.pom rather than remembered: protoc emits code
+                                # against a runtime of the same line, and 3.x codegen on a 4.x runtime
+                                # fails at class-load time — long after the build went green.
+protoGoogleCommon = "2.64.1"    # google.rpc.RetryInfo: the STANDARD "come back in N" error detail,
+                                # which every gRPC client library already knows how to read.
+
 # --- Build plugins ---------------------------------------------------------
 spotless          = "7.0.4"     # Auto-formatting. Ends every "reformat the file" code review.
 palantirFormat    = "2.68.0"    # The Java formatter Spotless drives. Opinionated, zero config.
@@ -126,6 +136,21 @@ aws-dynamodb            = { module = "software.amazon.awssdk:dynamodb" }
 aws-dynamodb-enhanced   = { module = "software.amazon.awssdk:dynamodb-enhanced" }
 aws-s3                  = { module = "software.amazon.awssdk:s3" }
 aws-sqs                 = { module = "software.amazon.awssdk:sqs" }
+
+# gRPC (BS-09). The BOM aligns every grpc-* artifact, exactly like the JUnit and AWS BOMs above.
+# Note what is deliberately ABSENT: a Spring Boot gRPC starter. ADR-0010 records why — we own the
+# Server so its shutdown can take part in BS-01's ordered drain.
+grpc-bom                = { module = "io.grpc:grpc-bom",                  version.ref = "grpc" }
+# grpc-api carries Server, Status, Metadata and Context — types our own code names directly. It also
+# arrives transitively via grpc-stub, but depending on a transitive for a COMPILE-time type is how a
+# build breaks on somebody else's unrelated upgrade.
+grpc-api                = { module = "io.grpc:grpc-api" }                 # version from the BOM
+grpc-stub               = { module = "io.grpc:grpc-stub" }                # StreamObserver + generated stubs
+grpc-protobuf           = { module = "io.grpc:grpc-protobuf" }            # protobuf ⇄ gRPC marshalling
+grpc-netty-shaded       = { module = "io.grpc:grpc-netty-shaded" }        # the HTTP/2 server transport
+grpc-inprocess          = { module = "io.grpc:grpc-inprocess" }           # tests: a real server, no sockets
+protobuf-java           = { module = "com.google.protobuf:protobuf-java", version.ref = "protobuf" }
+proto-google-common-protos = { module = "com.google.api.grpc:proto-google-common-protos", version.ref = "protoGoogleCommon" }
 
 # Plugin MARKER artifacts. To APPLY a third-party plugin from inside a
 # convention plugin, build-logic needs it on its compile classpath as a normal

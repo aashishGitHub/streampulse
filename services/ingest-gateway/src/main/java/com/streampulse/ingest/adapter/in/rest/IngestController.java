@@ -2,6 +2,7 @@
 
 package com.streampulse.ingest.adapter.in.rest;
 
+import com.streampulse.ingest.adapter.in.TenantResolver;
 import com.streampulse.ingest.application.IngestUseCase;
 import com.streampulse.ingest.domain.IngestCommand;
 import com.streampulse.ingest.domain.IngestResult;

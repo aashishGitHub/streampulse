@@ -50,6 +50,18 @@ public class TestJwtSupport {
 
     @Bean
     JwtDecoder testJwtDecoder() {
+        return decoder();
+    }
+
+    /**
+     * The same decoder, without a Spring context.
+     *
+     * <p>The gRPC tests build an in-process server out of plain objects — no context at all —
+     * and still need the real {@code JwtAuthInterceptor} with a real decoder behind it. Sharing
+     * this factory with the {@code @Bean} above is what keeps "the token the tests mint" and
+     * "the token the interceptor accepts" the same thing by construction.
+     */
+    public static JwtDecoder decoder() {
         return NimbusJwtDecoder.withSecretKey(new SecretKeySpec(SECRET.getBytes(), "HmacSHA256"))
                 .build();
     }
