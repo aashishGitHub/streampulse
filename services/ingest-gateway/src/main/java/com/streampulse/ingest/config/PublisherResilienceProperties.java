@@ -74,4 +74,32 @@ public record PublisherResilienceProperties(
          * just an ever-growing pile of blocked threads each still holding an in-flight
          * permit, until ingest stops accepting anything at all.
          */
-        @NotNull Duration callTimeout) {}
+        @NotNull Duration callTimeout,
+
+        /**
+         * Total attempts INCLUDING the first, so 3 means one call and two retries.
+         *
+         * <p>Keep it small. Every attempt runs while the batch still holds an in-flight
+         * permit, so this multiplies capacity consumption during exactly the incident where
+         * capacity matters most. Three is enough to ride over a blip; ten is a way of
+         * turning a dependency's bad minute into your own bad hour.
+         */
+        @Min(1) int retryMaxAttempts,
+
+        /** Wait before the first retry. Doubled (times the multiplier) on each attempt. */
+        @NotNull Duration retryInitialBackoff,
+
+        /** Growth factor between attempts. 2.0 is the usual doubling. */
+        @DecimalMin("1.0") double retryBackoffMultiplier,
+
+        /**
+         * Randomisation applied to each wait, as a fraction: 0.5 means each interval is
+         * picked from ±50% of its nominal value.
+         *
+         * <p>Jitter is not a refinement, it is the point. A hundred callers that failed at
+         * the same instant will, without it, retry at the same instant — the retry wave is
+         * exactly as synchronised as the failure was, and the second spike lands on a
+         * dependency that has not recovered from the first. Spreading them is what turns a
+         * thundering herd back into ordinary traffic.
+         */
+        @DecimalMin("0.0") @DecimalMax("1.0") double retryJitterFactor) {}

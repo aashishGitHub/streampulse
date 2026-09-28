@@ -487,31 +487,72 @@ it also supports a wait that grows on each reopen. For a fixed wait, attempt 1 i
 configured value. Worth the two minutes: it would otherwise have been a compile error at
 best, and a plausible-looking wrong answer in an interview at worst.
 
+### Verified — Retry with backoff and jitter (REQ-RS-01)
+
+Retry sits **outermost**: `Retry ( CircuitBreaker ( TimeLimiter ( publish ) ) )`, matching
+the Resilience4j starter's documented aspect order.
+
+Seven new tests. The two load-bearing claims were again checked by mutation rather than
+taken on trust:
+
+```
+# moving retry INSIDE the breaker
+THE ORDERING PROOF: the breaker counts every ATTEMPT, not every batch FAILED
+    expected: OPEN
+     but was: CLOSED
+
+# swapping ofExponentialRandomBackoff for ofExponentialBackoff
+backoff is JITTERED, so retries do not arrive in lockstep FAILED
+    [a fixed backoff would produce only two distinct values]
+    Expecting size of: to be greater than 2 but was 2
+```
+
+Retry outside the breaker means the breaker counts every *attempt*, so a dependency that
+is failing outright trips it after 2 batches instead of 4. The tax is having to exclude
+`CallNotPermittedException` — a 300ms retry budget cannot outwait a 30s open breaker, so
+retrying it only delays the 503 the client needs.
+
+**The rule worth remembering: retry is only safe for FAST failures.** Not "is this error
+transient?" but "is it transient *and* cheap?". Every attempt holds the in-flight permit,
+so retrying a 5s timeout turns one held permit into 15 seconds of held permit — multiplying
+consumption of the very resource the breaker exists to protect, during the incident. So
+timeouts are excluded, along with batch rejections that would fail identically anyway.
+
+The exclusion list lives on `ResilientEventPublisher.retryPolicy(...)`, not in Spring
+config: which of a publisher's failures are worth another attempt is knowledge about the
+publisher. It also means the tests exercise the exact policy production runs, instead of a
+copy that drifts.
+
+One thing worth knowing: **retry makes duplicates more likely, and that is accepted**.
+Kinesis `PutRecords` is not idempotent. Kafka's producer has `enable.idempotence` with a
+producer id and per-partition sequence numbers so the broker can drop a retried duplicate;
+Kinesis has no equivalent. Consistent with ADR-0007 — duplicates are absorbed downstream, a
+gap is not.
+
 ### Full suite
 
 ```
 $ ./gradlew build
-BUILD SUCCESSFUL in 14s
+BUILD SUCCESSFUL in 20s
 
-  kata                      tests= 25 failures=0 errors=0 skipped=0
-  libs/contracts            tests= 28 failures=0 errors=0 skipped=0
-  libs/platform             tests= 39 failures=0 errors=0 skipped=0
-  services/ingest-gateway   tests= 40 failures=0 errors=0 skipped=0
-  TOTAL                     tests=132 failures=0 errors=0 skipped=0
+  kata                      tests= 25 failures=0 errors=0
+  libs/contracts            tests= 28 failures=0 errors=0
+  libs/platform             tests= 39 failures=0 errors=0
+  services/ingest-gateway   tests= 47 failures=0 errors=0
+  TOTAL                     tests=139 failures=0 errors=0
 ```
 
 ### Still outstanding in Phase 2
 
 Honest scope:
 
-- **Resilience4j `Retry` and `Bulkhead`** (REQ-RS-01, REQ-RS-05) — the circuit breaker and
-  time limiter are done; retry with exponential backoff + jitter is not. The in-flight
-  `Semaphore` is already a semaphore bulkhead in effect; whether to replace it with the
-  library's is a Phase 9 decision once there are measurements.
-- **gRPC adapter** — BS-09 / REQ-GR-01…07 not started.
+- **Resilience4j `Bulkhead`** (REQ-RS-05) — the in-flight `Semaphore` is already a
+  semaphore bulkhead in effect; whether to replace it with the library's is a Phase 9
+  decision, once there are measurements to justify either way.
+- **gRPC adapter** — BS-09 / REQ-GR-01…07.
 - **Keycloak** — tests use a symmetric-key `JwtDecoder` under a test profile. That proves
   expiry, signature and the tenant claim are checked; it does **not** prove Keycloak's JWKS
   rotation, issuer or audience validation. Those need the real issuer.
 - **Actuator health groups** — configured in `application.yml`, never asserted by a test.
-- **Breaker thresholds are guesses.** They are chosen to be explainable, not measured.
-  Phase 9 replaces them.
+- **Breaker and retry numbers are guesses.** They are chosen to be explainable, not
+  measured. Phase 9 replaces them.

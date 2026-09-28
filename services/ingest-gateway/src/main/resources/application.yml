@@ -143,6 +143,13 @@ streampulse:
       call-timeout: 5s                   # hard ceiling; must exceed slow-call threshold,
                                          # or every slow call becomes a timeout and the
                                          # slow-call signal never fires
+      # Retry rides over a single FAST blip (REQ-RS-01). Deliberately small: every attempt
+      # holds the in-flight permit, so retries multiply capacity use during an incident.
+      # Worst case here is ~0.3s of extra hold, against 5s if timeouts were retried too.
+      retry-max-attempts: 3              # 1 call + 2 retries
+      retry-initial-backoff: 100ms
+      retry-backoff-multiplier: 2.0      # 100ms, 200ms
+      retry-jitter-factor: 0.5           # ±50%, so retries do not arrive in lockstep
 
 logging:
   level:

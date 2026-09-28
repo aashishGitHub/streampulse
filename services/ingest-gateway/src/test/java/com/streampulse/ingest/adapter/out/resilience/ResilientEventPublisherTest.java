@@ -9,9 +9,13 @@ import com.streampulse.ingest.domain.EventPublisher;
 import com.streampulse.ingest.domain.PublishUnavailableException;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
+import io.github.resilience4j.core.IntervalFunction;
+import io.github.resilience4j.retry.Retry;
 import io.github.resilience4j.timelimiter.TimeLimiter;
 import io.github.resilience4j.timelimiter.TimeLimiterConfig;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -19,6 +23,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -56,6 +61,10 @@ class ResilientEventPublisherTest {
     private static final Duration SLOW_THRESHOLD = Duration.ofMillis(100);
     private static final Duration CALL_TIMEOUT = Duration.ofMillis(300);
 
+    private static final int MAX_ATTEMPTS = 3;
+    private static final Duration RETRY_BACKOFF = Duration.ofMillis(20);
+    private static final double JITTER = 0.5;
+
     private static final EventPublisher.TenantScopedEvents BATCH =
             new EventPublisher.TenantScopedEvents("streamflix", List.of());
 
@@ -63,6 +72,9 @@ class ResilientEventPublisherTest {
     private CircuitBreaker breaker;
     private ScheduledExecutorService scheduler;
     private ResilientEventPublisher publisher;
+
+    /** Every wait the retry actually slept, captured from its events. */
+    private final List<Duration> retryIntervals = Collections.synchronizedList(new ArrayList<>());
 
     @BeforeEach
     void setUp() {
@@ -86,8 +98,16 @@ class ResilientEventPublisherTest {
                 .cancelRunningFuture(true)
                 .build());
 
+        // The production policy, not a copy of it. If someone changes which exceptions are
+        // worth retrying, these tests exercise the change instead of silently drifting.
+        Retry retry = Retry.of(
+                "test",
+                ResilientEventPublisher.retryPolicy(
+                        MAX_ATTEMPTS, IntervalFunction.ofExponentialRandomBackoff(RETRY_BACKOFF, 2.0, JITTER)));
+        retry.getEventPublisher().onRetry(e -> retryIntervals.add(e.getWaitInterval()));
+
         scheduler = Executors.newSingleThreadScheduledExecutor();
-        publisher = new ResilientEventPublisher(delegate, breaker, timeLimiter, scheduler);
+        publisher = new ResilientEventPublisher(delegate, breaker, timeLimiter, retry, scheduler);
     }
 
     @AfterEach
@@ -294,11 +314,137 @@ class ResilientEventPublisherTest {
         }
     }
 
+    @Nested
+    @DisplayName("Retry — riding over a blip, and knowing when not to")
+    class Retrying {
+
+        @Test
+        @DisplayName("one fast failure is absorbed; the caller never learns it happened")
+        void oneBlipIsRiddenOver() {
+            delegate.mode = Mode.FLAKY;
+            delegate.failuresRemaining.set(1);
+
+            assertThat(publishAndCatch())
+                    .as("the retry succeeded, so this is a success")
+                    .isNull();
+            assertThat(delegate.calls).hasValue(2);
+            assertThat(retryIntervals).hasSize(1);
+        }
+
+        @Test
+        @DisplayName("it gives up after maxAttempts and surfaces the real failure")
+        void givesUpAfterMaxAttempts() {
+            delegate.mode = Mode.FAIL; // fails forever
+
+            assertThat(publishAndCatch()).isInstanceOf(IllegalStateException.class);
+            assertThat(delegate.calls)
+                    .as("maxAttempts COUNTS the first call, so 3 means one call and two retries")
+                    .hasValue(MAX_ATTEMPTS);
+        }
+
+        @Test
+        @DisplayName("THE ORDERING PROOF: the breaker counts every ATTEMPT, not every batch")
+        void eachAttemptIsCountedByTheBreaker() {
+            // The window needs 4 recorded calls before it will compute a rate at all.
+            //
+            //   retry OUTSIDE (chosen):  2 batches x 3 attempts = 6 recorded -> OPEN
+            //   retry INSIDE:            2 batches x 1 result   = 2 recorded -> still CLOSED
+            //
+            // So a dependency that is failing outright trips the breaker three times sooner
+            // this way -- which is the point of paying the "must ignore CallNotPermitted" tax.
+            delegate.mode = Mode.FAIL;
+
+            publishAndCatch();
+            publishAndCatch();
+
+            assertThat(breaker.getState()).isEqualTo(CircuitBreaker.State.OPEN);
+        }
+
+        @Test
+        @DisplayName("an OPEN breaker is not retried — 300ms of retries cannot outwait a 30s outage")
+        void openBreakerIsNotRetried() {
+            drivePastTheThreshold();
+            int callsBefore = delegate.calls.get();
+            retryIntervals.clear();
+
+            Throwable thrown = publishAndCatch();
+
+            assertThat(thrown).isInstanceOf(PublishUnavailableException.class);
+            assertThat(retryIntervals)
+                    .as("retrying an open breaker only delays the 503 the client needs")
+                    .isEmpty();
+            assertThat(delegate.calls).hasValue(callsBefore);
+        }
+
+        @Test
+        @DisplayName("a TIMEOUT is not retried — a slow failure would triple the permit hold")
+        void timeoutsAreNotRetried() {
+            // The rule is not "is this transient?" but "is it transient AND cheap?".
+            // Retrying a 300ms timeout three times holds the in-flight permit for 900ms;
+            // at the production 5s timeout that is 15 seconds of capacity, per batch,
+            // during the incident when capacity is scarcest.
+            delegate.mode = Mode.HANG;
+
+            long startNanos = System.nanoTime();
+            Throwable thrown = publishAndCatch();
+            Duration elapsed = Duration.ofNanos(System.nanoTime() - startNanos);
+
+            assertThat(thrown).isInstanceOf(PublishUnavailableException.class);
+            assertThat(retryIntervals).isEmpty();
+            assertThat(delegate.calls).hasValue(1);
+            assertThat(elapsed)
+                    .as("one timeout's worth of waiting, not three")
+                    .isLessThan(CALL_TIMEOUT.multipliedBy(2));
+        }
+
+        @Test
+        @DisplayName("a rejection of THIS batch is not retried — attempt two fails identically")
+        void batchRejectionsAreNotRetried() {
+            delegate.mode = Mode.FAIL;
+            delegate.failure = new IllegalArgumentException("record too large");
+
+            assertThat(publishAndCatch()).isInstanceOf(IllegalArgumentException.class);
+            assertThat(delegate.calls).hasValue(1);
+            assertThat(retryIntervals).isEmpty();
+        }
+
+        @Test
+        @DisplayName("backoff is JITTERED, so retries do not arrive in lockstep")
+        void backoffIsJittered() {
+            // Jitter is the difference between a retry wave and a thundering herd: without
+            // it, every caller that failed at the same instant retries at the same instant,
+            // and the second spike lands on a dependency still recovering from the first.
+            //
+            // A fixed backoff would make every interval for a given attempt identical. The
+            // assertion is therefore simply: they are NOT all the same. That is exactly the
+            // property lost by switching to ofExponentialBackoff, and it is what this test
+            // is here to catch.
+            delegate.mode = Mode.FAIL;
+            for (int i = 0; i < 8; i++) {
+                breaker.transitionToClosedState(); // keep the breaker out of the way
+                publishAndCatch();
+            }
+
+            assertThat(retryIntervals).as("8 batches x 2 retries").hasSizeGreaterThanOrEqualTo(8);
+            assertThat(retryIntervals.stream().distinct().collect(Collectors.toList()))
+                    .as("a fixed backoff would produce only two distinct values")
+                    .hasSizeGreaterThan(2);
+
+            // And every wait stays inside the randomised band: nominal x (1 +/- jitter),
+            // across attempts 1 and 2 (20ms and 40ms nominal).
+            long lowest = (long) (RETRY_BACKOFF.toMillis() * (1 - JITTER));
+            long highest = (long) (RETRY_BACKOFF.toMillis() * 2 * (1 + JITTER));
+            assertThat(retryIntervals).allSatisfy(d -> assertThat(d.toMillis()).isBetween(lowest, highest));
+        }
+    }
+
     // ------------------------------------------------------------- the delegate
 
     private enum Mode {
         SUCCEED,
         FAIL,
+        /** Fails while {@code failuresRemaining} lasts, then succeeds — a transient blip. */
+        FLAKY,
         SLOW,
         HANG
     }
@@ -310,6 +456,7 @@ class ResilientEventPublisherTest {
         volatile Mode mode = Mode.SUCCEED;
         volatile RuntimeException failure = new IllegalStateException("broker unreachable");
         volatile Duration delay = Duration.ZERO;
+        final AtomicInteger failuresRemaining = new AtomicInteger();
 
         private final List<CompletableFuture<Void>> hanging = new java.util.ArrayList<>();
 
@@ -319,6 +466,10 @@ class ResilientEventPublisherTest {
             return switch (mode) {
                 case SUCCEED -> CompletableFuture.completedFuture(null);
                 case FAIL -> CompletableFuture.failedFuture(failure);
+                case FLAKY ->
+                    failuresRemaining.getAndDecrement() > 0
+                            ? CompletableFuture.failedFuture(failure)
+                            : CompletableFuture.completedFuture(null);
                 case SLOW ->
                     CompletableFuture.supplyAsync(
                             () -> null, CompletableFuture.delayedExecutor(delay.toMillis(), TimeUnit.MILLISECONDS));

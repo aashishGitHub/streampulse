@@ -18,6 +18,10 @@ import com.streampulse.ingest.lifecycle.IngestDrainLifecycle;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
+import io.github.resilience4j.core.IntervalFunction;
+import io.github.resilience4j.retry.Retry;
+import io.github.resilience4j.retry.RetryConfig;
+import io.github.resilience4j.retry.RetryRegistry;
 import io.github.resilience4j.timelimiter.TimeLimiter;
 import io.github.resilience4j.timelimiter.TimeLimiterConfig;
 import io.github.resilience4j.timelimiter.TimeLimiterRegistry;
@@ -90,11 +94,13 @@ class IngestConfig {
             AvroEventMapper mapper,
             CircuitBreaker breaker,
             TimeLimiter timeLimiter,
+            Retry retry,
             ScheduledExecutorService publishTimeoutScheduler) {
         return new ResilientEventPublisher(
                 new KinesisEventPublisher(kinesis, aws.kinesisStreamName(), mapper),
                 breaker,
                 timeLimiter,
+                retry,
                 publishTimeoutScheduler);
     }
 
@@ -106,11 +112,13 @@ class IngestConfig {
             AvroEventMapper mapper,
             CircuitBreaker breaker,
             TimeLimiter timeLimiter,
+            Retry retry,
             ScheduledExecutorService publishTimeoutScheduler) {
         return new ResilientEventPublisher(
                 new KafkaEventPublisher(kafkaTemplate, props.rawTopic(), mapper),
                 breaker,
                 timeLimiter,
+                retry,
                 publishTimeoutScheduler);
     }
 
@@ -168,6 +176,35 @@ class IngestConfig {
                         }));
 
         return breaker;
+    }
+
+    /**
+     * Retry, whose policy (what is worth another attempt) belongs to the publisher and is
+     * defined in {@link ResilientEventPublisher#retryPolicy} — see there for why each
+     * exclusion exists. Only the numbers are configuration; the judgement is not.
+     */
+    @Bean
+    Retry eventPublisherRetry(RetryRegistry registry, PublisherResilienceProperties props) {
+        RetryConfig config = ResilientEventPublisher.retryPolicy(
+                props.retryMaxAttempts(),
+                IntervalFunction.ofExponentialRandomBackoff(
+                        props.retryInitialBackoff(), props.retryBackoffMultiplier(), props.retryJitterFactor()));
+
+        Retry retry = registry.retry(PUBLISHER, config);
+
+        // DEBUG, not WARN: a retry that succeeds is the system absorbing a blip exactly as
+        // designed, and the client never learned anything went wrong. What deserves
+        // attention is the RATE, which Micrometer already carries via the registry.
+        retry.getEventPublisher()
+                .onRetry(event -> log.debug(
+                        "Retrying publish, attempt {} after {}ms: {}",
+                        event.getNumberOfRetryAttempts(),
+                        event.getWaitInterval().toMillis(),
+                        event.getLastThrowable() == null
+                                ? "no throwable"
+                                : event.getLastThrowable().toString()));
+
+        return retry;
     }
 
     @Bean

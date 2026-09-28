@@ -6,6 +6,9 @@ import com.streampulse.ingest.domain.EventPublisher;
 import com.streampulse.ingest.domain.PublishUnavailableException;
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.core.IntervalFunction;
+import io.github.resilience4j.retry.Retry;
+import io.github.resilience4j.retry.RetryConfig;
 import io.github.resilience4j.timelimiter.TimeLimiter;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
@@ -36,12 +39,21 @@ import org.slf4j.LoggerFactory;
  * <h2>The ordering, which is the whole point</h2>
  *
  * <pre>
- *   CircuitBreaker ( TimeLimiter ( publish ) )
- *   └── outer ──────┘└── inner ──┘
+ *   Retry ( CircuitBreaker ( TimeLimiter ( publish ) ) )
+ *   └─ outermost ─┘          └──── innermost ────┘
  * </pre>
  *
- * The time limiter is <b>inside</b>, so the breaker observes its {@code TimeoutException} as
- * a failure and counts it.
+ * This matches the documented default aspect order of the Resilience4j Spring Boot starter
+ * (Retry → CircuitBreaker → RateLimiter → TimeLimiter → Bulkhead, outside in). Composing it
+ * by hand means the order is a line of code rather than a property nobody looks up.
+ *
+ * <p><b>Retry outside the breaker</b>, so every individual attempt is counted. Put retry
+ * inside and the breaker sees one call per batch instead of three, so a dependency that is
+ * failing outright takes three times as long to trip it — exactly when you want it to trip
+ * fastest. The cost is that retry must be told not to retry an open breaker, below.
+ *
+ * <p><b>The time limiter innermost</b>, so the breaker observes its {@code TimeoutException}
+ * as a failure and counts it.
  *
  * <p>Reverse them and the breaker sits inside a timeout that will cut the call off before the
  * breaker ever learns anything. A dependency that hangs would then never trip it — and
@@ -55,11 +67,25 @@ import org.slf4j.LoggerFactory;
  * <pre>
  *   failure modes this guards against
  *   ─────────────────────────────────────────────────────────────────────────────
+ *   broker blips once (fast error)  → Retry rides over it; the client never sees it
+ *   broker throttles                → Retry backs off with jitter, then gives up
  *   broker slow (still answering)   → slowCallDurationThreshold counts it as failure
  *   broker hanging (no answer)      → TimeLimiter cuts it, breaker counts the timeout
  *   broker down (fast rejects)      → failureRateThreshold opens the breaker
  *   breaker open                    → fail fast, 503 + Retry-After, no thread parked
  * </pre>
+ *
+ * <h2>Retry is only safe for FAST failures</h2>
+ *
+ * Every attempt runs while this batch still holds an in-flight permit, and permits are the
+ * gateway's capacity. Retrying a failure that takes 5 seconds to arrive turns one permit-held
+ * batch into fifteen seconds of held permit — multiplying consumption of the very resource
+ * the breaker exists to protect, at the worst possible moment.
+ *
+ * <p>So timeouts are <b>not</b> retried. A fast error costs a few hundred milliseconds and is
+ * worth riding over; a slow one is handed back to the client, who can retry without holding
+ * anything of ours. That is the whole rule, and it is the one people miss: the question is not
+ * "is this error transient?" but "is it transient <em>and</em> cheap?".
  *
  * <h2>What happens to the batch</h2>
  *
@@ -75,6 +101,7 @@ public class ResilientEventPublisher implements EventPublisher {
     private final EventPublisher delegate;
     private final CircuitBreaker circuitBreaker;
     private final TimeLimiter timeLimiter;
+    private final Retry retry;
     private final ScheduledExecutorService timeoutScheduler;
 
     /**
@@ -87,14 +114,53 @@ public class ResilientEventPublisher implements EventPublisher {
     /** Shorter, because a timeout says nothing about how long the trouble will last. */
     private static final Duration RETRY_AFTER_ON_TIMEOUT = Duration.ofSeconds(2);
 
+    /**
+     * The retry policy for a publisher — which of ITS failures are worth another attempt.
+     *
+     * <p>Lives here rather than in Spring configuration because it is knowledge about this
+     * class's own failure modes, not about wiring. It also means the tests exercise the
+     * exact policy production runs, instead of a copy that quietly drifts from it.
+     *
+     * <p>What NOT to retry is the harder half, and each exclusion prevents a specific way of
+     * making an incident worse:
+     *
+     * <ul>
+     *   <li>{@link CallNotPermittedException} — the breaker is open, and stays open for its
+     *       configured wait. Retrying inside a sub-second budget cannot succeed; it only
+     *       delays the 503 the client needs. This is the tax for putting retry OUTSIDE the
+     *       breaker, and it is worth paying for attempt-level failure counting.
+     *   <li>{@link TimeoutException} — a SLOW failure. Retrying multiplies how long this
+     *       batch holds an in-flight permit (5s becomes 15s), draining capacity during the
+     *       incident. The client can retry a slow failure at no cost to us; we cannot.
+     *   <li>{@link IllegalArgumentException} — the broker rejected THIS batch: record too
+     *       large, bad partition key. Attempt two fails identically, and three identical
+     *       failures are just a slower error message.
+     * </ul>
+     *
+     * <p>Everything else is retried. A stricter design would whitelist known-transient types
+     * instead, but that needs {@link EventPublisher} to classify its own failures — Kinesis
+     * and Kafka throw entirely unrelated exceptions, and naming either here would couple this
+     * class to one of them. Worth revisiting once both adapters' failure modes are mapped.
+     */
+    public static RetryConfig retryPolicy(int maxAttempts, IntervalFunction backoff) {
+        return RetryConfig.custom()
+                .maxAttempts(maxAttempts)
+                .intervalFunction(backoff)
+                .ignoreExceptions(
+                        CallNotPermittedException.class, TimeoutException.class, IllegalArgumentException.class)
+                .build();
+    }
+
     public ResilientEventPublisher(
             EventPublisher delegate,
             CircuitBreaker circuitBreaker,
             TimeLimiter timeLimiter,
+            Retry retry,
             ScheduledExecutorService timeoutScheduler) {
         this.delegate = delegate;
         this.circuitBreaker = circuitBreaker;
         this.timeLimiter = timeLimiter;
+        this.retry = retry;
         this.timeoutScheduler = timeoutScheduler;
         // There is no getWaitDurationInOpenState(): Resilience4j models the open-state wait
         // as an IntervalFunction (attempt number -> millis), because it also supports a wait
@@ -118,11 +184,15 @@ public class ResilientEventPublisher implements EventPublisher {
         Supplier<CompletionStage<Void>> timed =
                 TimeLimiter.decorateCompletionStage(timeLimiter, timeoutScheduler, call);
 
-        // OUTER: count failures, and reject outright once the rate is past the threshold.
+        // MIDDLE: count failures, and reject outright once the rate is past the threshold.
         Supplier<CompletionStage<Void>> guarded = CircuitBreaker.decorateCompletionStage(circuitBreaker, timed);
 
+        // OUTER: ride over a single fast blip. Shares the scheduler with the time limiter --
+        // it only sleeps between attempts, so one thread covers both jobs.
+        Supplier<CompletionStage<Void>> retried = Retry.decorateCompletionStage(retry, timeoutScheduler, guarded);
+
         try {
-            return guarded.get()
+            return retried.get()
                     .toCompletableFuture()
                     // Translate infrastructure exceptions into the domain's vocabulary at the
                     // boundary, which is this class's reason to exist.

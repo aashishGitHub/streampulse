@@ -1,6 +1,6 @@
-# ADR-0009 — A circuit breaker and a timeout around the event publisher
+# ADR-0009 — A circuit breaker, a timeout and a retry around the event publisher
 
-**Status:** accepted · **Date:** 2026-09-29 · **Phase:** 2 · **Requirements:** REQ-IG-21, REQ-RS-02, REQ-RS-06
+**Status:** accepted · **Date:** 2026-09-29 · **Phase:** 2 · **Requirements:** REQ-IG-21, REQ-RS-01, REQ-RS-02, REQ-RS-06
 
 ## Context
 
@@ -22,12 +22,16 @@ still holding an in-flight permit, until the semaphore is empty.
 
 ## Decision
 
-Wrap `EventPublisher` in `ResilientEventPublisher`: a **circuit breaker** outside a
-**time limiter**, applied as a decorator rather than an annotation.
+Wrap `EventPublisher` in `ResilientEventPublisher`: a **retry** outside a **circuit
+breaker** outside a **time limiter**, applied as a decorator rather than an annotation.
 
 ```
-CircuitBreaker ( TimeLimiter ( publish ) )
+Retry ( CircuitBreaker ( TimeLimiter ( publish ) ) )
 ```
+
+This matches the documented default aspect order of the Resilience4j Spring Boot starter
+(Retry → CircuitBreaker → RateLimiter → TimeLimiter → Bulkhead, outside in). Composing it
+by hand means the order is a line of code rather than a property nobody looks up.
 
 ## Why a decorator and not `@CircuitBreaker`
 
@@ -63,6 +67,78 @@ THE ORDERING PROOF: a hanging broker times out, and the breaker counts it FAILED
 **Nine of the ten tests still passed with the wrong order.** Only the test written
 specifically for it caught the fault — which is a fair summary of why "which patterns did
 you use" is a much easier question than "in what order, and what breaks if you swap them".
+
+## Retry outside the breaker, and the tax that comes with it
+
+Retry is **outermost**, so the breaker counts every individual attempt rather than one
+result per batch. With a window that needs 4 recorded calls and 3 attempts per batch, a
+dependency failing outright trips the breaker after 2 batches instead of 4 — three times
+sooner, which is what you want from a breaker.
+
+Verified by mutation, moving retry inside the breaker:
+
+```
+THE ORDERING PROOF: the breaker counts every ATTEMPT, not every batch FAILED
+    expected: OPEN
+     but was: CLOSED
+```
+
+The tax is that retry must be told **not** to retry `CallNotPermittedException`. The
+breaker stays open for 30 seconds; a 300ms retry budget cannot outwait it, so retrying
+only delays the 503 the client needs.
+
+## Retry is only safe for FAST failures
+
+This is the rule that is easy to state and easy to get wrong. The question is not *"is
+this error transient?"* but *"is it transient **and** cheap?"*
+
+Every attempt runs while the batch still holds an in-flight permit, and permits are the
+gateway's capacity. Retrying a failure that takes 5 seconds to surface turns one held
+permit into 15 seconds of held permit — multiplying consumption of the very resource the
+breaker exists to protect, at the worst possible moment.
+
+So the exclusion list is where the thinking lives, and it is defined on
+`ResilientEventPublisher.retryPolicy(...)` rather than in Spring configuration: which of a
+publisher's failures are worth another attempt is knowledge about the publisher, not about
+wiring. It also means the tests run the exact policy production runs.
+
+| Excluded | Why |
+|---|---|
+| `CallNotPermittedException` | breaker is open for 30s; a sub-second retry budget cannot succeed |
+| `TimeoutException` | slow failure — retrying triples the permit hold during the incident |
+| `IllegalArgumentException` | the broker rejected *this* batch; attempt two fails identically |
+
+Everything else is retried. A stricter design would whitelist known-transient types, but
+that needs the `EventPublisher` port to classify its own failures — Kinesis and Kafka throw
+entirely unrelated exceptions, and naming either in the decorator would couple it to one of
+them. Worth revisiting once both adapters' failure modes are mapped.
+
+### Jitter is the point, not a refinement
+
+Backoff uses `IntervalFunction.ofExponentialRandomBackoff(100ms, 2.0, 0.5)`.
+
+Without randomisation, a hundred callers that failed at the same instant retry at the same
+instant: the retry wave is exactly as synchronised as the failure was, and the second spike
+lands on a dependency that has not recovered from the first.
+
+The test asserts the property directly — the observed intervals are **not all identical**.
+Mutating to `ofExponentialBackoff` (no jitter) fails it:
+
+```
+[a fixed backoff would produce only two distinct values]
+Expecting size of: to be greater than 2 but was 2
+```
+
+### Retry makes duplicates more likely, and that is accepted
+
+Kinesis `PutRecords` is **not** idempotent. Kafka's producer has `enable.idempotence` with
+a producer id and per-partition sequence numbers, so the broker can drop a duplicate from a
+retried batch; Kinesis has no equivalent, so a retried publish after a partial success
+genuinely duplicates records.
+
+Consistent with ADR-0007 and the release-on-failure decision below: duplicates are absorbed
+by idempotent aggregation downstream, a gap is unrecoverable. It is worth knowing that this
+is a real difference between the two backbones and not a detail — see ADR-0008.
 
 ## The coupling nobody expects: the breaker needed an idempotency fix first
 
@@ -155,9 +231,9 @@ timeout and the slow-call signal never fires.
 - Thresholds are guesses until Phase 9 measures them.
 - Cancelling a future on timeout is a request, not a guarantee — the record may still land,
   so duplicates are possible on retry. Accepted, consistent with ADR-0007.
-- **Not yet done:** Resilience4j `Retry` with exponential backoff and jitter (REQ-RS-01) and
-  `Bulkhead` (REQ-RS-05). The in-flight `Semaphore` is already a semaphore bulkhead in
-  effect; whether to replace it with the library's is a Phase 9 decision.
+- **Not yet done:** Resilience4j `Bulkhead` (REQ-RS-05). The in-flight `Semaphore` is
+  already a semaphore bulkhead in effect; whether to replace it with the library's is a
+  Phase 9 decision, once there are measurements to justify either way.
 
 ## Alternatives rejected
 
@@ -167,7 +243,13 @@ throughput collapses to `permits / timeout`.
 
 **Retry instead of a breaker.** Retrying into a dependency that is already failing adds
 load exactly when it can least take it — a retry storm. Retry and a breaker solve different
-problems and belong together, with retry *outside* the breaker so its attempts are counted.
+problems and belong together: retry absorbs the single blip, the breaker stops retry from
+becoming the outage. Note that the breaker is also what bounds the retry — once it opens,
+retries stop entirely.
+
+**Retrying everything, including timeouts.** Superficially more resilient, actually the
+opposite: it converts a dependency's slowness into a capacity collapse on our side, because
+each retried slow call keeps holding a permit.
 
 **`@CircuitBreaker` annotations.** Needs a proxy the use case does not have, and hides the
 ordering in aspect configuration instead of stating it in code.
