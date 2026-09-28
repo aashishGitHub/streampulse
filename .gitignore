@@ -33,3 +33,4 @@ replay_pid*
 data/
 *.jfr
 *.hprof
+build/generated/

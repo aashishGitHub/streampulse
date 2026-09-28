@@ -1,0 +1,93 @@
+openapi: 3.1.0
+info:
+  title: StreamPulse Query API
+  version: 1.0.0
+  description: |
+    Serves dashboards: historical metric queries and a live SSE stream.
+
+    Reads are split by access pattern. Recent windows come from Redis; anything older comes
+    from DynamoDB. The API hides which, but reports `source` so a slow response can be
+    explained rather than guessed at.
+servers:
+  - url: http://localhost:8082
+security:
+  - bearerAuth: []
+paths:
+  /v1/metrics/{tenantId}/{metric}:
+    get:
+      operationId: queryMetric
+      summary: Query a metric over a time range
+      parameters:
+        - { name: tenantId, in: path, required: true, schema: { type: string } }
+        - name: metric
+          in: path
+          required: true
+          schema: { type: string, enum: [CONCURRENT_VIEWERS, REBUFFER_RATIO, ERROR_RATE, STARTUP_TIME_MS, AVG_BITRATE_KBPS] }
+        - { name: from, in: query, required: true, schema: { type: string, format: date-time } }
+        - { name: to, in: query, required: true, schema: { type: string, format: date-time } }
+        - { name: titleId, in: query, schema: { type: string } }
+        - { name: region, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: Matching windows, oldest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  windows:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        windowStart: { type: string, format: date-time }
+                        value: { type: number }
+                        sampleCount: { type: integer, description: Low counts mean low confidence; the UI dims them }
+                        isFinal: { type: boolean, description: False while the window may still receive late events }
+                  source:
+                    type: string
+                    enum: [cache, store, mixed]
+                    description: Which tier answered. Exposed for debugging latency, not for clients to branch on.
+        '404':
+          description: Unknown tenant or metric
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/ProblemDetail' } } }
+
+  /v1/stream/metrics:
+    get:
+      operationId: streamMetrics
+      summary: Live metric stream (Server-Sent Events)
+      description: |
+        `text/event-stream`. Chosen over WebSocket because the flow is one-directional, it
+        works over ordinary HTTP through any proxy, and the browser reconnects on its own.
+
+        Operational details that matter:
+          - A comment heartbeat every 15s keeps proxies from closing an idle connection.
+          - `Last-Event-ID` on reconnect resumes from a bounded Redis ring buffer, so a
+            brief drop does not leave a gap in the chart.
+          - A slow client gets the LATEST value, not a queued backlog. For a live
+            dashboard, stale-but-current beats complete-but-behind.
+      parameters:
+        - { name: tenantId, in: query, required: true, schema: { type: string } }
+        - { name: metrics, in: query, schema: { type: array, items: { type: string } }, style: form, explode: false }
+        - name: Last-Event-ID
+          in: header
+          schema: { type: string }
+          description: Sent automatically by the browser on reconnect. Resumes from this point.
+      responses:
+        '200':
+          description: An open event stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+  schemas:
+    ProblemDetail:
+      type: object
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        traceId: { type: string }

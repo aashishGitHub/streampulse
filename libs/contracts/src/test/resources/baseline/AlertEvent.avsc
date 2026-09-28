@@ -1,0 +1,45 @@
+{
+  "type": "record",
+  "name": "AlertEvent",
+  "namespace": "com.streampulse.contracts.v1",
+  "doc": "An alert raised or cleared by the control-plane alert engine. Published to alerts.v1, keyed by tenant:ruleId.",
+
+  "fields": [
+    {"name": "alertId", "type": "string",
+     "doc": "DETERMINISTIC: hash(ruleId, windowStart). Not random. During the BS-08 service extraction both the old and new engines evaluate the same windows, and a deterministic id is what lets consumers dedup instead of paging twice."},
+
+    {"name": "tenantId", "type": "string"},
+    {"name": "ruleId", "type": "string"},
+    {"name": "ruleName", "type": "string", "default": "unnamed"},
+
+    {"name": "state", "type": {
+      "type": "enum", "name": "AlertState",
+      "symbols": ["ALERT_UNKNOWN", "FIRING", "RESOLVED", "SUPPRESSED"],
+      "default": "ALERT_UNKNOWN"}, "default": "ALERT_UNKNOWN",
+     "doc": "SUPPRESSED means a rule matched but an upstream root cause is already firing — see suppressedBy."},
+
+    {"name": "severity", "type": {
+      "type": "enum", "name": "Severity",
+      "symbols": ["SEVERITY_UNKNOWN", "INFO", "WARNING", "CRITICAL"],
+      "default": "SEVERITY_UNKNOWN"}, "default": "SEVERITY_UNKNOWN"},
+
+    {"name": "category", "type": {
+      "type": "enum", "name": "AlertCategory",
+      "symbols": ["CATEGORY_UNKNOWN", "CDN", "PACKAGER", "PLAYER", "INGEST", "PIPELINE"],
+      "default": "CATEGORY_UNKNOWN"}, "default": "CATEGORY_UNKNOWN",
+     "doc": "The node in the service dependency graph. Phase 6's BFS suppression walks CDN -> PACKAGER -> PLAYER."},
+
+    {"name": "titleId", "type": ["null", "string"], "default": null},
+    {"name": "region", "type": ["null", "string"], "default": null},
+
+    {"name": "observedValue", "type": ["null", "double"], "default": null},
+    {"name": "threshold", "type": ["null", "double"], "default": null},
+    {"name": "description", "type": ["null", "string"], "default": null},
+
+    {"name": "windowStart", "type": {"type": "long", "logicalType": "timestamp-millis"}},
+    {"name": "raisedAt", "type": {"type": "long", "logicalType": "timestamp-millis"}},
+
+    {"name": "suppressedBy", "type": ["null", "string"], "default": null,
+     "doc": "alertId of the upstream root cause that suppressed this one. Null unless state is SUPPRESSED. Carrying the id — not just a flag — is what lets an operator click through to the actual cause."}
+  ]
+}

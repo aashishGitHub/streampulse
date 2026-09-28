@@ -52,13 +52,15 @@ dependencyResolutionManagement {
 // the toolchain, the tests and the architecture rules work on plain Java first.
 // Every later phase adds modules here — the file grows as the system does.
 //
+//   libs:contracts Avro event schemas, OpenAPI + AsyncAPI documents. Depended on
+//                  by BOTH producers and consumers, which is why it is its own
+//                  module rather than living inside a service.
 //   libs:platform  shared kernel → becomes our own Spring Boot starter.
 //                  Phase 0 ships the domain primitives every service will use
 //                  (TenantId, EventId) plus the architecture rules that police
 //                  the whole codebase.
 //
 // Coming later:
-//   libs:contracts            Phase 1  (Avro + OpenAPI + proto codegen)
 //   services:ingest-gateway   Phase 2
 //   services:stream-processor Phase 3
 //   services:sink-writer      Phase 4
@@ -66,3 +68,4 @@ dependencyResolutionManagement {
 //   services:control-plane    Phase 6
 // ---------------------------------------------------------------------------
 include("libs:platform")
+include("libs:contracts")

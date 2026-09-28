@@ -1,0 +1,191 @@
+asyncapi: 3.0.0
+
+info:
+  title: StreamPulse Kafka topics
+  version: 1.0.0
+  description: |
+    The contract for every Kafka topic in StreamPulse.
+
+    This document exists because a topic is a contract with no compiler behind it. Key,
+    partition count, retention and cleanup policy are all decisions that are invisible in
+    code and expensive to change later — so they are written down, with the reason.
+
+    Schemas live in `libs/contracts/src/main/avro` and are enforced BACKWARD-compatible by
+    `SchemaCompatibilityTest`.
+
+defaultContentType: application/avro
+
+servers:
+  local:
+    host: localhost:9092
+    protocol: kafka
+    description: Single-broker KRaft cluster from docker/compose.yml (profile `core`)
+
+channels:
+  telemetryRaw:
+    address: telemetry.raw.v1
+    title: Raw telemetry events
+    description: |
+      Every observation from every player, exactly as ingested.
+
+      **Key: `sessionId`.** All events for one viewing session land on one partition, which
+      is the only way Kafka gives ordering — and `session_start → heartbeat → buffering →
+      session_end` must stay ordered for stream processing to be correct.
+
+      Rejected alternatives:
+        - `tenantId` — only three tenants, so three hot partitions and the rest idle.
+        - `null` (round-robin) — perfect balance, no ordering at all.
+
+      The cost we accept: aggregating per *title* needs a repartition, which is a network
+      hop and an extra topic. Ordering is a correctness property; repartitioning is a
+      performance cost. That is the trade.
+
+      **12 partitions.** Partition count is the ceiling on consumer-group parallelism, and
+      raising it later rehashes keys and BREAKS ordering — so pick above current need. 12
+      divides by 1, 2, 3, 4, 6 and 12, so consumers scale evenly.
+    messages:
+      telemetryEvent:
+        $ref: '#/components/messages/TelemetryEvent'
+    bindings:
+      kafka:
+        topic: telemetry.raw.v1
+        partitions: 12
+        replicas: 1        # local only — production would be 3 with min.insync.replicas=2
+
+  telemetryAgg:
+    address: telemetry.agg.v1
+    title: Windowed metric aggregates
+    description: |
+      Output of the Kafka Streams topology.
+
+      **Key: `tenantId:titleId:windowStart`.** A late event re-emits the same window, so a
+      keyed record overwrites the earlier provisional value instead of double-counting.
+
+      6 partitions: far lower volume than raw, and aggregation has already collapsed the
+      cardinality.
+    messages:
+      metricAggregate:
+        $ref: '#/components/messages/MetricAggregate'
+    bindings:
+      kafka:
+        topic: telemetry.agg.v1
+        partitions: 6
+        replicas: 1
+
+  alerts:
+    address: alerts.v1
+    title: Alerts raised and resolved
+    description: |
+      **Key: `tenantId:ruleId`** — so a FIRING and its later RESOLVED stay ordered.
+
+      Retained 90 days because the BS-10 SLA report is computed from alert history.
+      Low volume, so 3 partitions is ample.
+    messages:
+      alertEvent:
+        $ref: '#/components/messages/AlertEvent'
+    bindings:
+      kafka:
+        topic: alerts.v1
+        partitions: 3
+        replicas: 1
+
+  configChanges:
+    address: config.changes.v1
+    title: Control-plane changes (Debezium CDC)
+    description: |
+      Tenants, titles and alert rules, captured from the Postgres outbox by Debezium.
+
+      **Key: `entityId`. Cleanup policy: COMPACT.**
+
+      This is the one topic where compaction is the point. Consumers rebuild a cache from
+      it at startup, so they need the *current* value of every key — not the history of
+      changes. Compaction keeps the last record per key indefinitely at bounded size.
+
+      Two consequences that follow from compaction and are easy to get wrong:
+        - The payload must be a FULL SNAPSHOT, never a delta. After compaction the
+          intermediate records are gone, so a consumer replaying from the start would
+          apply a diff to a state it never saw.
+        - A delete is published as a null-payload TOMBSTONE. That is how a compacted topic
+          actually forgets a key.
+    messages:
+      configChange:
+        $ref: '#/components/messages/ConfigChange'
+    bindings:
+      kafka:
+        topic: config.changes.v1
+        partitions: 3
+        replicas: 1
+
+  telemetryRawDlt:
+    address: telemetry.raw.v1.dlt
+    title: Dead-letter topic for raw telemetry
+    description: |
+      Messages that failed processing after the configured retries.
+
+      A DLT is not a failure of the design — it is the design. Without one, a single poison
+      message blocks its partition forever, and one malformed payload stops a tenant's
+      entire pipeline.
+
+      Records keep their original key and carry the original topic, partition, offset and
+      the exception in headers, so a message can be diagnosed and replayed.
+    messages:
+      telemetryEvent:
+        $ref: '#/components/messages/TelemetryEvent'
+    bindings:
+      kafka:
+        topic: telemetry.raw.v1.dlt
+        partitions: 3
+        replicas: 1
+
+operations:
+  publishTelemetry:
+    action: send
+    channel: { $ref: '#/channels/telemetryRaw' }
+    summary: ingest-gateway publishes validated events
+  consumeTelemetry:
+    action: receive
+    channel: { $ref: '#/channels/telemetryRaw' }
+    summary: stream-processor and sink-writer consume, in separate consumer groups
+  publishAggregates:
+    action: send
+    channel: { $ref: '#/channels/telemetryAgg' }
+    summary: stream-processor publishes windowed aggregates
+  publishAlerts:
+    action: send
+    channel: { $ref: '#/channels/alerts' }
+    summary: control-plane alert engine publishes state changes
+  publishConfigChanges:
+    action: send
+    channel: { $ref: '#/channels/configChanges' }
+    summary: Debezium relays the control-plane outbox
+
+components:
+  messages:
+    TelemetryEvent:
+      name: TelemetryEvent
+      contentType: application/avro
+      payload:
+        schemaFormat: application/vnd.apache.avro+json;version=1.9.0
+        schema:
+          $ref: '../../libs/contracts/src/main/avro/TelemetryEvent.avsc'
+    MetricAggregate:
+      name: MetricAggregate
+      contentType: application/avro
+      payload:
+        schemaFormat: application/vnd.apache.avro+json;version=1.9.0
+        schema:
+          $ref: '../../libs/contracts/src/main/avro/MetricAggregate.avsc'
+    AlertEvent:
+      name: AlertEvent
+      contentType: application/avro
+      payload:
+        schemaFormat: application/vnd.apache.avro+json;version=1.9.0
+        schema:
+          $ref: '../../libs/contracts/src/main/avro/AlertEvent.avsc'
+    ConfigChange:
+      name: ConfigChange
+      contentType: application/avro
+      payload:
+        schemaFormat: application/vnd.apache.avro+json;version=1.9.0
+        schema:
+          $ref: '../../libs/contracts/src/main/avro/ConfigChange.avsc'

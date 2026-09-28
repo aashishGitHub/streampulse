@@ -1,0 +1,275 @@
+{
+  "type": "record",
+  "name": "TelemetryEvent",
+  "namespace": "com.streampulse.contracts.v1",
+  "doc": "A single telemetry observation from a video player. Published to telemetry.raw.v1, keyed by sessionId so that all events for one viewing session stay ordered within a partition.",
+  "fields": [
+    {
+      "name": "eventId",
+      "type": "string",
+      "doc": "Client-generated UUID. THE idempotency key for the whole pipeline: a retried request carries the SAME id as the original, which is what turns at-least-once delivery into effectively-once processing."
+    },
+    {
+      "name": "tenantId",
+      "type": "string",
+      "doc": "Owning tenant. Validated by com.streampulse.platform.domain.TenantId before it reaches a schema."
+    },
+    {
+      "name": "sessionId",
+      "type": "string",
+      "doc": "One continuous viewing session. Used as the Kafka partition key: high cardinality gives an even spread, and co-locating a session's events preserves their order."
+    },
+    {
+      "name": "titleId",
+      "type": [
+        "null",
+        "string"
+      ],
+      "default": null,
+      "doc": "Content identifier. Nullable because a session_start can precede title selection. UNION WITH NULL + DEFAULT is the pattern for every optional field \u2014 a field without a default cannot be added compatibly later."
+    },
+    {
+      "name": "deviceType",
+      "type": {
+        "type": "enum",
+        "name": "DeviceType",
+        "symbols": [
+          "DEVICE_UNKNOWN",
+          "WEB",
+          "MOBILE_IOS",
+          "MOBILE_ANDROID",
+          "SMART_TV",
+          "SET_TOP_BOX",
+          "GAME_CONSOLE"
+        ],
+        "default": "DEVICE_UNKNOWN",
+        "doc": "The enum 'default' is load-bearing: when a NEWER producer sends a symbol this consumer has never heard of, Avro maps it to DEVICE_UNKNOWN instead of throwing. Without it, adding a device type breaks every existing consumer."
+      },
+      "default": "DEVICE_UNKNOWN"
+    },
+    {
+      "name": "region",
+      "type": "string",
+      "default": "unknown",
+      "doc": "Geographic region, e.g. us-east-1. Used for per-region aggregation and for regional failure detection."
+    },
+    {
+      "name": "occurredAt",
+      "type": "int",
+      "doc": "EVENT time \u2014 when the player observed this, in UTC. Windowing in Phase 3 uses this, not receivedAt, which is why late data is possible at all."
+    },
+    {
+      "name": "receivedAt",
+      "type": {
+        "type": "long",
+        "logicalType": "timestamp-millis"
+      },
+      "doc": "INGEST time \u2014 when the gateway accepted it. The gap between this and occurredAt is the lateness; a device that was offline for an hour produces a large one."
+    },
+    {
+      "name": "type",
+      "type": {
+        "type": "enum",
+        "name": "EventType",
+        "symbols": [
+          "EVENT_UNKNOWN",
+          "SESSION_START",
+          "SESSION_END",
+          "HEARTBEAT",
+          "BUFFERING_START",
+          "BUFFERING_END",
+          "BITRATE_CHANGE",
+          "ERROR"
+        ],
+        "default": "EVENT_UNKNOWN"
+      },
+      "default": "EVENT_UNKNOWN",
+      "doc": "Discriminator. Redundant with the payload union, but it lets a consumer filter without deserializing the payload \u2014 a real saving at high volume."
+    },
+    {
+      "name": "payload",
+      "doc": "Exactly one variant. A union keeps ALL event types on ONE topic, which is what preserves per-session ordering; separate topics per type would lose it.",
+      "type": [
+        "null",
+        {
+          "type": "record",
+          "name": "SessionStart",
+          "fields": [
+            {
+              "name": "playerVersion",
+              "type": "string",
+              "default": "unknown"
+            },
+            {
+              "name": "initialBitrateKbps",
+              "type": [
+                "null",
+                "int"
+              ],
+              "default": null
+            },
+            {
+              "name": "startupTimeMillis",
+              "type": [
+                "null",
+                "int"
+              ],
+              "default": null,
+              "doc": "Time from play-click to first frame. A primary quality-of-experience metric."
+            }
+          ]
+        },
+        {
+          "type": "record",
+          "name": "SessionEnd",
+          "fields": [
+            {
+              "name": "watchedSeconds",
+              "type": "int",
+              "default": 0
+            },
+            {
+              "name": "reason",
+              "type": {
+                "type": "enum",
+                "name": "EndReason",
+                "symbols": [
+                  "END_UNKNOWN",
+                  "COMPLETED",
+                  "USER_STOPPED",
+                  "ERROR",
+                  "TIMEOUT"
+                ],
+                "default": "END_UNKNOWN"
+              },
+              "default": "END_UNKNOWN"
+            }
+          ]
+        },
+        {
+          "type": "record",
+          "name": "Heartbeat",
+          "doc": "The high-volume event: one per player every ~10s. Its size dominates the pipeline's cost, so it stays deliberately small.",
+          "fields": [
+            {
+              "name": "positionSeconds",
+              "type": "int",
+              "default": 0
+            },
+            {
+              "name": "bufferedSeconds",
+              "type": [
+                "null",
+                "int"
+              ],
+              "default": null
+            },
+            {
+              "name": "bitrateKbps",
+              "type": [
+                "null",
+                "int"
+              ],
+              "default": null
+            },
+            {
+              "name": "droppedFrames",
+              "type": [
+                "null",
+                "int"
+              ],
+              "default": null
+            }
+          ]
+        },
+        {
+          "type": "record",
+          "name": "BufferingEvent",
+          "doc": "A stall. Rebuffer ratio \u2014 stalled time over watched time \u2014 is the headline quality metric.",
+          "fields": [
+            {
+              "name": "durationMillis",
+              "type": [
+                "null",
+                "int"
+              ],
+              "default": null,
+              "doc": "Null on BUFFERING_START (not yet known), populated on BUFFERING_END."
+            },
+            {
+              "name": "positionSeconds",
+              "type": "int",
+              "default": 0
+            }
+          ]
+        },
+        {
+          "type": "record",
+          "name": "BitrateChange",
+          "fields": [
+            {
+              "name": "fromKbps",
+              "type": "int",
+              "default": 0
+            },
+            {
+              "name": "toKbps",
+              "type": "int",
+              "default": 0
+            },
+            {
+              "name": "reason",
+              "type": {
+                "type": "enum",
+                "name": "SwitchReason",
+                "symbols": [
+                  "SWITCH_UNKNOWN",
+                  "BANDWIDTH",
+                  "USER",
+                  "STARTUP",
+                  "SEEK"
+                ],
+                "default": "SWITCH_UNKNOWN"
+              },
+              "default": "SWITCH_UNKNOWN"
+            }
+          ]
+        },
+        {
+          "type": "record",
+          "name": "ErrorEvent",
+          "fields": [
+            {
+              "name": "code",
+              "type": "string",
+              "doc": "Stable machine-readable code, e.g. MANIFEST_404. Grouped by the alert engine, so it must NOT contain variable data."
+            },
+            {
+              "name": "message",
+              "type": [
+                "null",
+                "string"
+              ],
+              "default": null
+            },
+            {
+              "name": "fatal",
+              "type": "boolean",
+              "default": false
+            },
+            {
+              "name": "cdnNode",
+              "type": [
+                "null",
+                "string"
+              ],
+              "default": null,
+              "doc": "Which CDN edge served this. Phase 6's BFS root-cause suppression walks the CDN -> packager -> player dependency graph using this."
+            }
+          ]
+        }
+      ],
+      "default": null
+    }
+  ]
+}

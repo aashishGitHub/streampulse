@@ -30,4 +30,9 @@ dependencies {
     // the plugin id "com.diffplug.spotless" maps to the artifact
     // "com.diffplug.spotless:spotless-plugin-gradle".
     implementation(libs.spotless.plugin)
+
+    // Avro's compiler, so our custom AvroCodegenTask can call SpecificCompiler
+    // directly. This is a BUILD-TIME dependency of the build itself — it never
+    // reaches any module's compile or runtime classpath.
+    implementation(libs.avro.compiler)
 }

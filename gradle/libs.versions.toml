@@ -46,6 +46,11 @@ springBoot        = "3.5.3"     # Phase 2+. NOT applied yet — Phase 0 is delib
 testcontainers    = "1.21.3"    # Phase 2+. Real Postgres/Kafka/Redis in integration tests.
 slf4j             = "2.0.17"    # Logging facade.
 
+# --- Contracts (Phase 1) ---------------------------------------------------
+avro              = "1.12.1"    # Event serialization + the SchemaCompatibility API we gate on.
+jackson           = "2.19.0"    # JSON, and reading OpenAPI/AsyncAPI YAML in tests.
+swaggerParser     = "2.1.27"    # Validates OpenAPI documents at build time.
+
 # --- Build plugins ---------------------------------------------------------
 spotless          = "7.0.4"     # Auto-formatting. Ends every "reformat the file" code review.
 palantirFormat    = "2.68.0"    # The Java formatter Spotless drives. Opinionated, zero config.
@@ -69,6 +74,14 @@ awaitility         = { module = "org.awaitility:awaitility",              versio
 slf4j-api          = { module = "org.slf4j:slf4j-api",                    version.ref = "slf4j" }
 
 testcontainers-bom = { module = "org.testcontainers:testcontainers-bom",  version.ref = "testcontainers" }
+
+# Contracts. avro-tools is used ONLY by the codegen task, never at runtime —
+# it is wired to its own configuration so it cannot leak onto the runtime classpath.
+avro               = { module = "org.apache.avro:avro",                   version.ref = "avro" }
+avro-compiler      = { module = "org.apache.avro:avro-compiler",          version.ref = "avro" }
+jackson-databind   = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
+jackson-yaml       = { module = "com.fasterxml.jackson.dataformat:jackson-dataformat-yaml", version.ref = "jackson" }
+swagger-parser     = { module = "io.swagger.parser.v3:swagger-parser",    version.ref = "swaggerParser" }
 
 # Plugin MARKER artifacts. To APPLY a third-party plugin from inside a
 # convention plugin, build-logic needs it on its compile classpath as a normal

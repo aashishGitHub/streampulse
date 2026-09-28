@@ -1,0 +1,157 @@
+openapi: 3.1.0
+
+info:
+  title: StreamPulse Ingest API
+  version: 1.0.0
+  description: |
+    Accepts batched telemetry from players.
+
+    Three properties define this API, and each exists for a reason you can point at:
+
+    1. **Batched.** One HTTP request per event would spend more on TLS and headers than on
+       payload. Batching amortises that.
+    2. **Idempotent.** Every event carries a client-generated `eventId`. A retry after a
+       lost response is recognised and ignored, which is what turns at-least-once delivery
+       into effectively-once processing.
+    3. **Backpressured.** When the pipeline is saturated the API returns `429` with
+       `Retry-After` rather than buffering without bound. Unbounded buffering does not
+       prevent failure — it relocates it to the heap and makes it worse.
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+security:
+  - bearerAuth: []
+
+paths:
+  /v1/events:batch:
+    post:
+      operationId: ingestBatch
+      summary: Ingest a batch of telemetry events
+      description: |
+        Accepts up to 500 events. Partial success is **not** supported: either the whole
+        batch is accepted or none of it is. Partial acceptance would force every client to
+        implement per-event retry bookkeeping, and most would get it wrong.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema: { type: string, format: uuid }
+          description: |
+            Optional batch-level key. Per-event `eventId` already makes ingestion
+            idempotent; this lets a client cheaply short-circuit an entire retried batch
+            without the server deduplicating 500 ids one at a time.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/EventBatch' }
+      responses:
+        '202':
+          description: |
+            Accepted. 202 rather than 201: the events are durably published to Kafka but
+            not yet processed, and claiming otherwise would be a lie the client might act on.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BatchAccepted' }
+        '400':
+          description: Malformed batch or a failed field validation
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '401':
+          description: Missing or invalid token
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '413':
+          description: Batch exceeds 500 events
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '429':
+          description: |
+            Rate limit or in-flight capacity exceeded — **backpressure, not an error**.
+
+            Two distinct causes, deliberately given different `type` URIs so a client can
+            tell them apart:
+              - the tenant exceeded its quota (the client's problem: slow down)
+              - the gateway is saturated (our problem: another instance may cope)
+          headers:
+            Retry-After:
+              schema: { type: integer }
+              description: Seconds to wait. Clients MUST add jitter, or every rejected client retries in lockstep and the next spike is worse than the first.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '503':
+          description: Downstream unavailable; the circuit breaker is open
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT from Keycloak. The `tenant` claim determines data isolation.
+
+  schemas:
+    EventBatch:
+      type: object
+      required: [events]
+      properties:
+        events:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items: { $ref: '#/components/schemas/TelemetryEvent' }
+
+    TelemetryEvent:
+      type: object
+      description: JSON projection of the Avro schema in libs/contracts. Avro remains the source of truth.
+      required: [eventId, sessionId, occurredAt, type]
+      properties:
+        eventId:
+          type: string
+          format: uuid
+          description: Client-generated. THE idempotency key — a retry must reuse it, not mint a new one.
+        sessionId: { type: string, description: Kafka partition key; preserves per-session ordering }
+        titleId: { type: [string, 'null'] }
+        deviceType:
+          type: string
+          enum: [DEVICE_UNKNOWN, WEB, MOBILE_IOS, MOBILE_ANDROID, SMART_TV, SET_TOP_BOX, GAME_CONSOLE]
+        region: { type: string }
+        occurredAt:
+          type: string
+          format: date-time
+          description: EVENT time (UTC), when the player observed it — not when it was sent.
+        type:
+          type: string
+          enum: [EVENT_UNKNOWN, SESSION_START, SESSION_END, HEARTBEAT, BUFFERING_START, BUFFERING_END, BITRATE_CHANGE, ERROR]
+        payload:
+          type: [object, 'null']
+          description: Shape depends on `type`; see the Avro union.
+      # tenantId is deliberately ABSENT: it comes from the JWT, never the body.
+      # Accepting it from the client would let any caller write into another tenant.
+
+    BatchAccepted:
+      type: object
+      properties:
+        accepted: { type: integer, description: Events published }
+        duplicates: { type: integer, description: Recognised as already-seen and skipped — a healthy number, not an error }
+        batchId: { type: string, format: uuid }
+
+    ProblemDetail:
+      type: object
+      description: RFC 7807. One error shape across every endpoint, so clients parse one thing.
+      properties:
+        type: { type: string, format: uri, example: 'https://streampulse.dev/problems/quota-exceeded' }
+        title: { type: string, example: 'Tenant quota exceeded' }
+        status: { type: integer, example: 429 }
+        detail: { type: string }
+        instance: { type: string, format: uri }
+        traceId: { type: string, description: Ties the response to a distributed trace — the first thing support asks for }

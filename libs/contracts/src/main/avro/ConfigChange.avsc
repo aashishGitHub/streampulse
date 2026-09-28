@@ -1,0 +1,32 @@
+{
+  "type": "record",
+  "name": "ConfigChange",
+  "namespace": "com.streampulse.contracts.v1",
+  "doc": "A control-plane change captured from the Postgres outbox by Debezium and published to config.changes.v1. Consumers refresh their caches from it. The topic is COMPACTED, so this record must be a complete snapshot of the entity, never a delta.",
+
+  "fields": [
+    {"name": "changeId", "type": "string", "doc": "Outbox row id. Lets a consumer dedup if the CDC connector replays after a restart."},
+
+    {"name": "entityType", "type": {
+      "type": "enum", "name": "EntityType",
+      "symbols": ["ENTITY_UNKNOWN", "TENANT", "TITLE", "ALERT_RULE", "PARTNER_SUBSCRIPTION"],
+      "default": "ENTITY_UNKNOWN"}, "default": "ENTITY_UNKNOWN"},
+
+    {"name": "entityId", "type": "string", "doc": "The Kafka KEY for this topic. Compaction keeps the latest record per key, which is exactly 'the current state of this entity'."},
+    {"name": "tenantId", "type": ["null", "string"], "default": null},
+
+    {"name": "operation", "type": {
+      "type": "enum", "name": "ChangeOperation",
+      "symbols": ["OP_UNKNOWN", "CREATED", "UPDATED", "DELETED"],
+      "default": "OP_UNKNOWN"}, "default": "OP_UNKNOWN",
+     "doc": "DELETED is published with a null payload as a compaction TOMBSTONE, which is how a compacted topic actually forgets a key."},
+
+    {"name": "payload", "type": ["null", "string"], "default": null,
+     "doc": "The entity as JSON — a FULL snapshot, not a diff. Deltas are unusable on a compacted topic: after compaction the intermediate records are gone, so a consumer replaying from the start would apply a diff to a state it never saw. JSON rather than a nested union because entity shapes are owned by the control plane and evolve on their own schedule."},
+
+    {"name": "version", "type": "long", "default": 0,
+     "doc": "Optimistic-locking version from the source row. A consumer can drop an out-of-order replay by comparing it."},
+    {"name": "changedAt", "type": {"type": "long", "logicalType": "timestamp-millis"}},
+    {"name": "changedBy", "type": ["null", "string"], "default": null}
+  ]
+}

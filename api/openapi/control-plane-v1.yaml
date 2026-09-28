@@ -1,0 +1,120 @@
+openapi: 3.1.0
+info:
+  title: StreamPulse Control Plane API
+  version: 1.0.0
+  description: |
+    Administrative CRUD for tenants, titles and alert rules.
+
+    Every write also inserts a row into the transactional **outbox** in the SAME database
+    transaction. Debezium relays that row to `config.changes.v1`, which is how the rest of
+    the system learns about the change.
+
+    Why not just publish to Kafka after committing? Because "commit, then publish" has no
+    atomicity: a crash between the two leaves the database and the topic permanently
+    disagreeing, and no amount of try/catch fixes it. The outbox makes the change and its
+    announcement one atomic act. See docs/adr and interview-qa/07-cdc-outbox-sse.md.
+servers:
+  - url: http://localhost:8083
+security:
+  - bearerAuth: []
+paths:
+  /v1/admin/tenants:
+    get:
+      operationId: listTenants
+      summary: List tenants
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Tenant' } } } }
+    post:
+      operationId: createTenant
+      summary: Create a tenant
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/Tenant' } } }
+      responses:
+        '201': { description: Created }
+        '409':
+          description: Tenant id already exists
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/ProblemDetail' } } }
+
+  /v1/admin/tenants/tree:
+    get:
+      operationId: getTenantTree
+      summary: Tenants with their apps and titles
+      description: |
+        The N+1 lab (BS-05 / REQ-DL-03). The naive implementation issues one query per
+        tenant, then one per app; `TenantTreeQueryCountTest` asserts the whole response
+        costs at most 3 SQL statements regardless of how many tenants exist.
+      responses:
+        '200': { description: OK }
+
+  /v1/admin/rules:
+    post:
+      operationId: createAlertRule
+      summary: Create an alert rule
+      description: |
+        Rejects a rule whose dependencies would form a cycle. Detected with a topological
+        sort at save time — because a cyclic dependency graph makes the BFS root-cause
+        suppression in the alert engine non-terminating.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/AlertRule' } } }
+      responses:
+        '201': { description: Created }
+        '422':
+          description: The rule would introduce a dependency cycle
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/ProblemDetail' } } }
+
+  /v1/billing/usage:
+    get:
+      operationId: getUsage
+      summary: Per-tenant usage for a month
+      description: |
+        Heavy aggregate over `usage_hourly`. Deliberately implemented with hand-written SQL
+        via JdbcClient rather than JPA — the ADR records the benchmark that justified it.
+      parameters:
+        - { name: month, in: query, required: true, schema: { type: string, pattern: '^\d{4}-\d{2}$' } }
+      responses:
+        '200': { description: OK }
+
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+  schemas:
+    Tenant:
+      type: object
+      required: [tenantId, displayName]
+      properties:
+        tenantId:
+          type: string
+          pattern: '^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$'
+          description: Must match com.streampulse.platform.domain.TenantId — this value becomes a Kafka key, a Redis prefix, a DynamoDB partition key, an S3 prefix and a Prometheus label.
+        displayName: { type: string }
+        monthlyEventQuota: { type: integer, format: int64 }
+    AlertRule:
+      type: object
+      required: [ruleId, tenantId, metric, threshold]
+      properties:
+        ruleId: { type: string }
+        tenantId: { type: string }
+        metric: { type: string }
+        comparator: { type: string, enum: [GT, GTE, LT, LTE] }
+        threshold: { type: number }
+        severity: { type: string, enum: [INFO, WARNING, CRITICAL] }
+        category:
+          type: string
+          enum: [CDN, PACKAGER, PLAYER, INGEST, PIPELINE]
+          description: Node in the service dependency graph, used for root-cause suppression.
+        dependsOn:
+          type: array
+          items: { type: string }
+          description: Upstream categories. A cycle here is rejected at save time.
+    ProblemDetail:
+      type: object
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        traceId: { type: string }

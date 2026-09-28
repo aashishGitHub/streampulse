@@ -1,0 +1,33 @@
+{
+  "type": "record",
+  "name": "MetricAggregate",
+  "namespace": "com.streampulse.contracts.v1",
+  "doc": "A windowed metric produced by stream-processor and published to telemetry.agg.v1. Keyed by tenant:title:window so that late updates to the same window overwrite rather than duplicate.",
+
+  "fields": [
+    {"name": "tenantId", "type": "string"},
+    {"name": "titleId", "type": ["null", "string"], "default": null},
+    {"name": "region", "type": ["null", "string"], "default": null,
+     "doc": "Null means the aggregate is across all regions. A union rather than a magic 'ALL' string, so the absence is explicit in the type."},
+
+    {"name": "metric", "type": {
+      "type": "enum", "name": "MetricName",
+      "symbols": ["METRIC_UNKNOWN", "CONCURRENT_VIEWERS", "REBUFFER_RATIO", "ERROR_RATE", "STARTUP_TIME_MS", "AVG_BITRATE_KBPS"],
+      "default": "METRIC_UNKNOWN"}, "default": "METRIC_UNKNOWN"},
+
+    {"name": "windowStart", "type": {"type": "long", "logicalType": "timestamp-millis"},
+     "doc": "Inclusive start of the window, in EVENT time."},
+    {"name": "windowEndExclusive", "type": {"type": "long", "logicalType": "timestamp-millis"},
+     "doc": "Exclusive end. Half-open intervals [start, end) mean adjacent windows cannot double-count an event that lands exactly on a boundary."},
+
+    {"name": "value", "type": "double",
+     "doc": "The aggregate. double rather than float: Kafka Streams sums many values, and float's precision loss accumulates visibly over a window."},
+    {"name": "sampleCount", "type": "long", "default": 0,
+     "doc": "How many events contributed. A ratio computed from 3 samples is noise; the dashboard uses this to suppress low-confidence values."},
+
+    {"name": "computedAt", "type": {"type": "long", "logicalType": "timestamp-millis"},
+     "doc": "PROCESSING time. computedAt - windowEndExclusive is the pipeline's freshness lag — the SLI that BS-10 alerts on."},
+    {"name": "isFinal", "type": "boolean", "default": false,
+     "doc": "False while the window may still receive late events; true once the grace period has passed. Lets the dashboard show a provisional value immediately and correct it later."}
+  ]
+}

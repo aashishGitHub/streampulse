@@ -84,6 +84,8 @@ and, from Phase 2, **Docker**.
 | `build-logic/` | Convention plugins — the build's "house style", written once |
 | `gradle/libs.versions.toml` | Every dependency version, in one file |
 | `libs/platform/` | Shared kernel: domain primitives + architecture rules → becomes a Spring Boot starter in Phase 2 |
+| `libs/contracts/` | Avro event schemas + generated classes; the schema-evolution gate |
+| `api/` | OpenAPI (REST) and AsyncAPI (Kafka topic) contracts |
 | `specs/` | Spec-driven development: requirements → design → tasks, per phase |
 | `docs/adr/` | Architecture Decision Records — *why*, not *what* |
 | `docs/learning/` | Guided explanations, especially for the .NET → Java transition |
@@ -115,7 +117,7 @@ code**, so "done" is a fact rather than an opinion.
 | Phase | Delivers | Status |
 |---|---|---|
 | **0** | Build foundation, conventions, domain primitives, architecture rules | ✅ done |
-| 1 | Contracts & schemas (Avro, OpenAPI, AsyncAPI) | ⬜ |
+| **1** | Contracts & schemas (Avro, OpenAPI, AsyncAPI) | ✅ done |
 | 2 | Ingest gateway (MVC + virtual threads, gRPC, idempotency, backpressure) | ⬜ |
 | 3 | Stream processing (Kafka Streams, windowing, exactly-once) | ⬜ |
 | 4 | Sinks & storage (Redis, DynamoDB, S3, DLT) | ⬜ |
