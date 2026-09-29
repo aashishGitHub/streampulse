@@ -1098,3 +1098,108 @@ never the problem; believing they covered issuer and audience was.
 - **`docker/keycloak/realms/` is imported, never exported.** A change made in the admin
   console is lost on `make nuke` and silently diverges until then. A `make export-realm`
   target would close that loop.
+
+---
+
+## Phase 2 — close-out · 2026-09-29
+
+Both parallel branches merged into `main`. Phase 2 is complete apart from the items listed
+at the end.
+
+### CORRECTION: every test total before this entry was 25 too high
+
+Earlier entries present a per-module table under a `$ ./gradlew build` heading, like this:
+
+```
+  kata                      tests= 25 failures=0 errors=0
+  ...
+  TOTAL                     tests=132 failures=0 errors=0
+```
+
+Two things are wrong with that, and both are mine.
+
+**It was not Gradle's output.** Gradle does not print a per-module test table. Those numbers
+came from a script that summed the JUnit XML under `**/build/test-results/`, formatted to
+look like console output. Putting non-output under a `$ command` prompt is exactly what the
+house rule against reconstructed output exists to prevent, even when the numbers are real.
+
+**The numbers were also wrong.** `kata` was removed from `settings.gradle.kts` during Phase
+0's scope change, but `kata/build/test-results/` was never deleted, so the script kept
+counting 25 results from a build dated 28 Sep against a module that no longer exists.
+
+| Entry said | Actually was |
+|---|---|
+| 132 (circuit breaker + timeout) | 107 |
+| 139 (retry) | 114 |
+| 165 (gRPC) | 140 |
+
+`kata/build` has been deleted, and the counting script now reads the module list out of
+`settings.gradle.kts` and ignores results from anything not in it.
+
+Caught by the Keycloak agent, which noticed its own total had *dropped* to 116 and, instead
+of quietly reporting the bigger number, worked out why. That is the behaviour that makes a
+MILESTONES file worth reading.
+
+### A defect found only by combining the two branches
+
+Rebasing the Keycloak branch onto the gRPC work turned all four `HealthProbesIT` tests red:
+
+```
+org.springframework.context.ApplicationContextException: Failed to start bean 'grpcServerLifecycle'
+    java.io.UncheckedIOException: gRPC server failed to bind port 9090
+        java.net.BindException: Address already in use
+```
+
+Neither branch was wrong alone. The gRPC tests already pass
+`streampulse.ingest.grpc.port=0`; the Keycloak tests were written before a gRPC server
+existed, so they took the configured 9090.
+
+The shape of it is the interesting part: **it cannot reproduce when you run either class on
+its own**, because one context binds 9090 quite happily. It needs two `@SpringBootTest`
+contexts in one JVM — so it shows up in a full build and in CI, and never while you are
+working on the test that fails. Fixed in `b51ad7b`.
+
+Worth generalising: anything that binds a fixed port is a shared global between test
+contexts, the same way a static field is. `webEnvironment = RANDOM_PORT` handles HTTP; every
+*other* listener needs the same treatment explicitly.
+
+### Verified — the merged result
+
+```
+$ ./gradlew clean build
+BUILD SUCCESSFUL in 46s
+```
+
+Test counts, read from the JUnit XML of the three modules in `settings.gradle.kts`
+(reproduced here as a table, not as console output):
+
+| Module | tests | failures | errors |
+|---|---|---|---|
+| `libs/contracts` | 28 | 0 | 0 |
+| `libs/platform` | 39 | 0 | 0 |
+| `services/ingest-gateway` | 82 | 0 | 0 |
+| **TOTAL** | **149** | **0** | **0** |
+
+That includes Testcontainers integration tests against moto (Kinesis), Redis and Keycloak.
+
+### Still outstanding — carried into later phases
+
+- **REQ-GR-06, the gRPC benchmark.** Not run, so **every efficiency claim in ADR-0010 is an
+  expectation, not a measurement**. That is the whole reason the protocol was added here.
+  Phase 9.
+- **`buf lint` / `buf breaking` are not in CI.** Nothing stops someone renumbering a protobuf
+  field, which is the one change that silently corrupts every existing client.
+- **REQ-GR-05, W3C trace context over gRPC.** Auth interceptor done, tracing interceptor not.
+  Phase 8, once the rest of the system has a tracing story to join.
+- **REQ-GR-07, L7 load balancing.** Documented in ADR-0010; nothing configured. Phase 11.
+- **Resilience4j `Bulkhead`** (REQ-RS-05). The in-flight `Semaphore` is already a semaphore
+  bulkhead in effect; replacing it is a Phase 9 decision once there are measurements.
+- **Authorization, as distinct from authentication.** The token proves who the caller is and
+  which API it was minted for. Nothing restricts what it may *do* — scopes and roles untouched.
+- **No test sends a real SIGTERM.** The drain test calls `stop()` directly, proving the
+  readiness flip and the liveness non-flip, not the full `SmartLifecycle` ordering under an
+  actual signal. `RollingRestartChaosIT` is Phase 11.
+- **Every number in Phase 2 is explainable, not measured** — breaker thresholds, retry
+  backoff, `stream-flush-size`, permit counts. Phase 9 replaces them with data.
+- **REST/gRPC divergence on a missing tenant claim** (500 vs `UNAUTHENTICATED`). gRPC is
+  right; changing REST is a contract change and belongs with the OpenAPI document.
