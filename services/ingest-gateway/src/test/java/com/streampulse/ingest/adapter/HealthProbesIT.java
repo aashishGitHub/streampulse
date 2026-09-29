@@ -52,7 +52,13 @@ import org.springframework.test.annotation.DirtiesContext;
  * probes are answered from in-process availability state. Keeping it out of the Testcontainers
  * suite is deliberate — it stays in the fast run, where a broken probe is noticed in seconds.
  */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+// streampulse.ingest.grpc.port=0 asks the OS for a free port. Without it the gRPC server
+// binds the configured 9090, and the SECOND @SpringBootTest context in the JVM dies with
+// "Address already in use" -- a failure that appears only once more than one context runs,
+// which is to say only in a full build and never when you run the class on its own.
+@SpringBootTest(
+        webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+        properties = "streampulse.ingest.grpc.port=0")
 @Import(TestJwtSupport.class)
 // The drain is a ONE-WAY DOOR: nothing sets readiness back to ACCEPTING_TRAFFIC. Ordering is
 // therefore explicit rather than incidental, and the context is discarded afterwards so a
