@@ -89,7 +89,7 @@ BUILD FAILED in 900ms
 **2. The value-object tests catch a widened validation rule**
 
 These gates were first verified against the algorithm katas that Phase 0 originally shipped
-(commit `41deee0`); the katas were subsequently removed as out of scope, and the equivalent
+(commit `9d69e6a`); the katas were subsequently removed as out of scope, and the equivalent
 gate now sits on the domain primitives. Deleting the `fresh > 0` guard in the old BFS code
 produced:
 
@@ -151,7 +151,7 @@ coding-interview track. **Removed**: StreamPulse is for learning the Java ecosys
 cloud environment, and DSA practice is a different skill that was diluting the project's
 focus.
 
-The code remains in git history at commit `41deee0` if it is ever wanted, and the full
+The code remains in git history at commit `9d69e6a` if it is ever wanted, and the full
 worked solutions live in `../Java/interview-qa/17-coding-lru-and-graphs.md`.
 
 It was replaced by `TenantId` and `EventId` — value objects that are genuinely load-bearing
@@ -1157,7 +1157,7 @@ existed, so they took the configured 9090.
 The shape of it is the interesting part: **it cannot reproduce when you run either class on
 its own**, because one context binds 9090 quite happily. It needs two `@SpringBootTest`
 contexts in one JVM — so it shows up in a full build and in CI, and never while you are
-working on the test that fails. Fixed in `b51ad7b`.
+working on the test that fails. Fixed in `444d84a`.
 
 Worth generalising: anything that binds a fixed port is a shared global between test
 contexts, the same way a static field is. `webEnvironment = RANDOM_PORT` handles HTTP; every

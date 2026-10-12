@@ -2,13 +2,15 @@
 
 Single place to pick the work back up.
 
-**Phase 2 is merged to `main`. Branch `phase3-kafka-slice` (uncommitted, nothing committed yet)
+**Phase 2 is merged to `main`. Branch `phase3-kafka-slice` (committed as `7d1e4ba`; not pushed yet)
 holds the whole 5-day interview slice: Kafka backbone (ADR-0012), stream-processor, sink-writer,
 query-api, load generator, observability config, `docs/script.md` and `docs/deep-dive.md`.
 460 tests, 0 failures. The pipeline has been run end to end: 1,500 events/s, p99 ingest 68.7 ms,
 freshness 5.2 to 5.4 s per window. All recorded in MILESTONES.md, Phase 3 Days 2-5.**
 
-A copy of the Day 1 diff is not kept anywhere outside the working tree: **commit this branch.**
+History was rewritten once, before anything was pushed, to author everything as the personal
+identity (`aashishGitHub`). Commit hashes in this file and in MILESTONES.md are the NEW ones; the
+pre-rewrite history is in `~/streampulse-before-rewrite.bundle` (delete once you no longer need it).
 
 ---
 
@@ -16,15 +18,15 @@ A copy of the Day 1 diff is not kept anywhere outside the working tree: **commit
 
 ```
 $ git log --oneline -9
-d9487e5  Phase 2 close-out, and correct the inflated test counts
-b51ad7b  Pin the gRPC port to 0 in the Keycloak and health-probe tests
-95accc8  Phase 2: real OIDC against Keycloak, and health probes that have been seen to move
-36ce59f  Add RESUME-HERE.md
-096ebd2  Phase 2: gRPC as a second ingest protocol, over the same use case
-7229585  Phase 2: retry with backoff and jitter, outside the breaker (REQ-RS-01)
-05c6cd5  Phase 2: circuit breaker + timeout, and the data-loss bug it uncovered
-352b134  Phase 2: JWT auth, per-tenant quotas, graceful drain
-fc14688  Phase 2: ingest gateway on AWS Kinesis, with Kafka as a comparison adapter
+c62cf2d  Phase 2 close-out, and correct the inflated test counts
+444d84a  Pin the gRPC port to 0 in the Keycloak and health-probe tests
+4f55b95  Phase 2: real OIDC against Keycloak, and health probes that have been seen to move
+61c7289  Add RESUME-HERE.md
+275ea22  Phase 2: gRPC as a second ingest protocol, over the same use case
+4a057e1  Phase 2: retry with backoff and jitter, outside the breaker (REQ-RS-01)
+efad591  Phase 2: circuit breaker + timeout, and the data-loss bug it uncovered
+da34a38  Phase 2: JWT auth, per-tenant quotas, graceful drain
+7e7f66d  Phase 2: ingest gateway on AWS Kinesis, with Kafka as a comparison adapter
 ```
 
 ```
@@ -96,7 +98,8 @@ such table. They are markdown tables now, labelled as such.
 
 Nothing is blocking. In priority order:
 
-1. **Commit the branch** (nothing is committed).
+1. **Push both branches** (`main`, `phase3-kafka-slice`) once the private repo exists under
+   `aashishGitHub`. There was no remote before this session: until pushed, this exists on one disk.
 2. **Read `docs/script.md` aloud once**, then `docs/deep-dive.md`. Figures tagged
    "(not measured: ...)" were never measured: do not quote them.
 3. **Measurements still missing** (each is a Phase 9 item): the saturation point (raise the

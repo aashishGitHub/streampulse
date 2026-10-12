@@ -13,9 +13,11 @@ info:
     2. **Idempotent.** Every event carries a client-generated `eventId`. A retry after a
        lost response is recognised and ignored, which is what turns at-least-once delivery
        into effectively-once processing.
-    3. **Backpressured.** When the pipeline is saturated the API returns `429` with
-       `Retry-After` rather than buffering without bound. Unbounded buffering does not
-       prevent failure — it relocates it to the heap and makes it worse.
+    3. **Backpressured.** Past its limits the API refuses rather than buffering without
+       bound: `429` with `Retry-After` when the TENANT exceeds its quota, `503` with
+       `Retry-After` when the GATEWAY is saturated or the event stream is unavailable.
+       Unbounded buffering does not prevent failure — it relocates it to the heap and makes
+       it worse.
 
 servers:
   - url: http://localhost:8080
@@ -72,12 +74,8 @@ paths:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
         '429':
           description: |
-            Rate limit or in-flight capacity exceeded — **backpressure, not an error**.
-
-            Two distinct causes, deliberately given different `type` URIs so a client can
-            tell them apart:
-              - the tenant exceeded its quota (the client's problem: slow down)
-              - the gateway is saturated (our problem: another instance may cope)
+            The TENANT exceeded its quota — **backpressure, not an error**. The client's
+            problem: slow down. (Gateway saturation is a different status: see 503.)
           headers:
             Retry-After:
               schema: { type: integer }
@@ -86,7 +84,14 @@ paths:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
         '503':
-          description: Downstream unavailable; the circuit breaker is open
+          description: |
+            Our problem, not the client's: the gateway is saturated (in-flight limit reached),
+            or the event stream is unavailable (the circuit breaker is open). Another
+            instance may cope, so a client retries elsewhere or later.
+          headers:
+            Retry-After:
+              schema: { type: integer }
+              description: Seconds to wait, with jitter.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
