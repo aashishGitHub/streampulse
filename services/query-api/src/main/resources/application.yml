@@ -1,0 +1,76 @@
+# ============================================================================
+#  query-api configuration
+# ============================================================================
+
+spring:
+  application:
+    name: query-api
+
+  lifecycle:
+    timeout-per-shutdown-phase: 25s
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      # Lettuce's default command timeout is 60 s, far past any request budget here.
+      timeout: 2s
+
+  datasource:
+    url: ${POSTGRES_URL:jdbc:postgresql://localhost:5432/streampulse}
+    username: ${POSTGRES_USER:streampulse}
+    password: ${POSTGRES_PASSWORD:streampulse}   # local only, as in docker/compose.yml
+    hikari:
+      # Equal to streampulse.query.blocking.size: the executor, not the pool, is the limit.
+      maximum-pool-size: 8
+      # 250 ms is Hikari's minimum. A request budget is 300 ms; waiting longer for a connection is pointless.
+      connection-timeout: 250
+
+server:
+  port: ${SERVER_PORT:8082}
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: always            # local only
+      group:
+        # State probes ONLY, in both groups: a Redis or Postgres blip must not restart or de-route
+        # every instance, because the overview degrades per part instead (REQ-QA-18).
+        liveness:
+          include: livenessState
+        readiness:
+          include: readinessState
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+streampulse:
+  query:
+    # Targets until Phase 9 measures them.
+    overview:
+      budget: 300ms
+      history-lookback: 15m
+      max-history-rows: 1000
+      catalog-latency: 20ms           # the stub control plane
+    blocking:
+      size: 8
+      queue-capacity: 16
+    stream:
+      heartbeat: 15s
+      coalesce-window: 250ms
+      replay-limit: 1000
+      key: sp:agg:live
+      auto-start: true
+    latest-key-prefix: "sp:latest:"
+    call-timeout: 1s
+
+logging:
+  level:
+    com.streampulse: DEBUG

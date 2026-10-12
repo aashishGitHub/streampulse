@@ -1,0 +1,412 @@
+{
+  "id": null,
+  "uid": "streampulse-pipeline",
+  "title": "StreamPulse Pipeline",
+  "description": "End-to-end pipeline health: ingest, consumer lag, freshness, dead letters, sink queue.",
+  "tags": [
+    "streampulse"
+  ],
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Ingest accepted events/s",
+      "description": "Rate of streampulse_ingest_events_published_total (events published to the backbone).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "streampulse-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "streampulse-prometheus"
+          },
+          "expr": "sum(rate(streampulse_ingest_events_published_total[1m]))",
+          "legendFormat": "events/s",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Ingest 5xx ratio and p99 latency",
+      "description": "5xx ratio includes 503 backpressure. p99 needs the bucket series: it stays empty unless management.metrics.distribution.percentiles-histogram.http.server.requests=true is set on ingest-gateway; the mean series always works.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "streampulse-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "streampulse-prometheus"
+          },
+          "expr": "sum(rate(http_server_requests_seconds_count{job=\"ingest-gateway\",uri=\"/v1/events:batch\",status=~\"5..\"}[1m])) / sum(rate(http_server_requests_seconds_count{job=\"ingest-gateway\",uri=\"/v1/events:batch\"}[1m]))",
+          "legendFormat": "5xx ratio",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "streampulse-prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(http_server_requests_seconds_bucket{job=\"ingest-gateway\",uri=\"/v1/events:batch\"}[1m])))",
+          "legendFormat": "p99 latency",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "streampulse-prometheus"
+          },
+          "expr": "sum(rate(http_server_requests_seconds_sum{job=\"ingest-gateway\",uri=\"/v1/events:batch\"}[1m])) / sum(rate(http_server_requests_seconds_count{job=\"ingest-gateway\",uri=\"/v1/events:batch\"}[1m]))",
+          "legendFormat": "mean latency",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "C"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Consumer lag (records, max)",
+      "description": "kafka_consumer_fetch_manager_records_lag_max: Kafka's windowed maximum lag over partitions assigned to each consumer client. NaN until the first fetch.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "streampulse-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "streampulse-prometheus"
+          },
+          "expr": "max by (job, client_id) (kafka_consumer_fetch_manager_records_lag_max)",
+          "legendFormat": "{{job}} {{client_id}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Freshness p99 (window end to durable write)",
+      "description": "Estimated from streampulse_sink_freshness_seconds buckets; resolution is limited by bucket width.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "streampulse-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "streampulse-prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(streampulse_sink_freshness_seconds_bucket[1m])))",
+          "legendFormat": "p99 freshness",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Dead-letter and rejected rate",
+      "description": "Events the processor rejected (by reason) and records the sink dead-lettered.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "streampulse-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "streampulse-prometheus"
+          },
+          "expr": "sum by (reason) (rate(streampulse_processor_events_rejected_total[1m]))",
+          "legendFormat": "rejected: {{reason}}",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "streampulse-prometheus"
+          },
+          "expr": "sum(rate(streampulse_sink_dead_letters_total[1m]))",
+          "legendFormat": "sink dead letters",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Batch-writer queue depth",
+      "description": "streampulse_sink_batch_queue_depth gauge: records waiting for the next flush.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "streampulse-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "streampulse-prometheus"
+          },
+          "expr": "sum(streampulse_sink_batch_queue_depth)",
+          "legendFormat": "queue depth",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    }
+  ]
+}

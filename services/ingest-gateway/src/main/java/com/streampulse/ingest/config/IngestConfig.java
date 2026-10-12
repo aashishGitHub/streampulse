@@ -30,10 +30,10 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.context.annotation.Profile;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.kafka.core.KafkaTemplate;
 import software.amazon.awssdk.services.kinesis.KinesisAsyncClient;
@@ -55,8 +55,8 @@ import software.amazon.awssdk.services.kinesis.KinesisAsyncClient;
  * reviewable place instead of sprayed across the codebase, and the ArchUnit rule that keeps
  * the domain framework-free has something to protect.
  *
- * <p>This is also the seam where Phase 10 swaps in the Kinesis publisher behind a
- * {@code @Profile}, with no other file changing.
+ * <p>This is also the seam that swaps the event backbone: {@code streampulse.backbone}
+ * selects the publisher, with no other file changing.
  */
 @Configuration
 class IngestConfig {
@@ -74,20 +74,21 @@ class IngestConfig {
     // -----------------------------------------------------------------------
     // THE STRATEGY SEAM.
     //
-    // Two implementations of the same port, selected by profile. This is the payoff
-    // of the hexagonal design: swapping the entire event backbone changes ONE bean
-    // definition and nothing else — not the use case, not the controller, not a test
-    // of the business rules.
+    // Two implementations of the same port, selected by streampulse.backbone. This is
+    // the payoff of the hexagonal design: swapping the entire event backbone changes
+    // ONE bean definition and nothing else — not the use case, not the controller, not
+    // a test of the business rules.
     //
-    //   default          Kinesis  (AWS-native; moto fakes it locally, free)
-    //   profile "kafka"  Kafka    (open source; run `make up-core`)
+    //   kafka    (default)  open source; run `make up-core`. Needed by stream-processor.
+    //   kinesis             AWS-native; moto fakes it locally. Kept as the comparison.
     //
-    // ADR-0008 compares them: shards vs partitions, sequence numbers vs offsets,
-    // and the per-shard quota that has no Kafka equivalent.
+    // A property and not a profile because a profile cannot express "Kafka unless told
+    // otherwise" without a negation on the other side, and ADR-0012 made Kafka the
+    // default. ADR-0008 (superseded) still holds the shards-vs-partitions comparison.
     // -----------------------------------------------------------------------
 
     @Bean
-    @Profile("!kafka")
+    @ConditionalOnProperty(name = "streampulse.backbone", havingValue = "kinesis")
     EventPublisher kinesisEventPublisher(
             KinesisAsyncClient kinesis,
             AwsProperties aws,
@@ -105,7 +106,7 @@ class IngestConfig {
     }
 
     @Bean
-    @Profile("kafka")
+    @ConditionalOnProperty(name = "streampulse.backbone", havingValue = "kafka", matchIfMissing = true)
     EventPublisher kafkaEventPublisher(
             KafkaTemplate<String, byte[]> kafkaTemplate,
             IngestProperties props,

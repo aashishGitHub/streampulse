@@ -195,13 +195,55 @@ tasks.withType<Test>().configureEach {
         }
     }
 
-    // Coverage is produced after every test run, so `./gradlew test` always
-    // leaves a usable report behind at build/reports/jacoco/.
+}
+
+// ---------------------------------------------------------------------------
+// TWO TEST TASKS, ONE SOURCE SET.
+//
+//   test             fast: everything NOT named *IT. No Docker needed.
+//   integrationTest  slow: only *IT classes, which start containers.
+//
+// A separate Gradle source set would force a second directory tree and duplicate
+// every test dependency. Splitting by NAME gives the same fast feedback loop for
+// a fraction of the build logic.
+//
+// `include` rather than a `filter`, plus failOnNoDiscoveredTests=false below: a module
+// with no *IT classes (libs:platform, libs:contracts) must not fail the build.
+// ---------------------------------------------------------------------------
+val testSourceSet = sourceSets.named("test")
+
+tasks.named<Test>("test") {
+    exclude("**/*IT.class")
+    // Coverage is produced after the unit run, so `./gradlew test` always leaves a
+    // usable report behind at build/reports/jacoco/. Attached to `test` ONLY:
+    // jacocoTestReport depends on `test`, so finalizing integrationTest with it
+    // would silently run the whole unit suite as well.
     finalizedBy(tasks.named("jacocoTestReport"))
+}
+
+val integrationTest = tasks.register<Test>("integrationTest") {
+    description = "Runs *IT classes (start containers; needs Docker)."
+    group = "verification"
+    testClassesDirs = testSourceSet.get().output.classesDirs
+    classpath = testSourceSet.get().runtimeClasspath
+    include("**/*IT.class")
+    // Gradle 9 fails a Test task that discovers nothing. libs:platform and libs:contracts
+    // have no *IT classes, and that is correct, not an error.
+    failOnNoDiscoveredTests = false
+    shouldRunAfter(tasks.named("test"))
+}
+
+tasks.named("check") {
+    dependsOn(integrationTest)
 }
 
 tasks.named<JacocoReport>("jacocoTestReport") {
     dependsOn(tasks.named("test"))
+    // Whatever exec files exist: the report must not force integrationTest to run, but
+    // when both are in the graph integrationTest must finish first or the report reads
+    // a half-written exec file (and Gradle rejects the undeclared ordering).
+    mustRunAfter(integrationTest)
+    executionData.setFrom(fileTree(layout.buildDirectory.dir("jacoco")) { include("*.exec") })
     reports {
         xml.required = true             // for CI tooling
         html.required = true            // build/reports/jacoco/test/html/index.html

@@ -1203,3 +1203,218 @@ That includes Testcontainers integration tests against moto (Kinesis), Redis and
   backoff, `stream-flush-size`, permit counts. Phase 9 replaces them with data.
 - **REST/gRPC divergence on a missing tenant claim** (500 vs `UNAUTHENTICATED`). gRPC is
   right; changing REST is a contract change and belongs with the OpenAPI document.
+
+
+---
+
+## Phase 3 · Day 1 — Kafka becomes the backbone · 2026-10-12 · ✅
+
+What changed: ADR-0012 (Kafka + Kafka Streams primary, supersedes ADR-0008); `streampulse.backbone`
+property replaces the profile; Kafka publisher stamps the record with `occurredAt`; a shared
+`AvroBinaryCodec`; an `integrationTest` Gradle task; compose and Makefile fixes.
+
+### Real Kafka, default configuration (no backbone property)
+
+```
+KafkaIngestIT > the record timestamp is the event's occurredAt, so Kafka Streams gets event time for free PASSED
+KafkaIngestIT > a batch lands on the default Kafka backbone keyed by sessionId, as decodable Avro PASSED
+KafkaIngestIT > all events of one session land on one partition, in submission order PASSED
+KafkaIngestIT > the producer is configured for idempotence and acks=all, the producer half of no loss / no duplicate PASSED
+KafkaIngestIT > a client retry of the same batch publishes each event once PASSED
+BUILD SUCCESSFUL in 16s
+```
+
+### Full suite
+
+```
+$ ./gradlew spotlessApply test integrationTest
+BUILD SUCCESSFUL in 2m 17s
+```
+
+| Module | task | tests | failures | errors |
+|---|---|---|---|---|
+| `libs/platform` | test | 39 | 0 | 0 |
+| `libs/contracts` | test | 32 | 0 | 0 |
+| `services/ingest-gateway` | test | 58 | 0 | 0 |
+| `services/ingest-gateway` | integrationTest | 29 | 0 | 0 |
+| **TOTAL** | | **158** | **0** | **0** |
+
+Was 149. The 9 new: 4 `AvroBinaryCodecTest`, 5 `KafkaIngestIT`. `ProtocolParityTest` was
+renamed `ProtocolParityIT` so it runs under `integrationTest`; the 82 ingest tests split into
+58 + 24 and the 5 new ones make 29.
+
+### Things that went wrong, and what they were
+
+1. **`apache/kafka:3.9.0` would not start under Testcontainers 1.21.2.** The container exited
+   with code 1: `advertised.listeners cannot use the nonroutable meta-address 0.0.0.0`.
+   Testcontainers configures a `0.0.0.0` listener; this image's start-up validates it before
+   Testcontainers' script exports the advertised one. **3.9.1 starts.** I did not establish
+   the root cause beyond that; I changed the tag and the test passed. Compose is pinned to
+   3.9.1 as well, so the IT and `make up-core` run the same broker.
+2. **Avro strings decode as `Utf8`.** Two of the first five assertions failed with
+   `expected: "…" (String) but was: "…" (Utf8)`. The generated classes use Avro's default
+   string type. This is a real hazard for Day 2: a `Utf8` never equals a `String`, so a
+   grouping key built from one silently splits groups. Documented on `AvroBinaryCodec`; keys
+   are built with `toString()`. The codegen was deliberately not changed.
+3. **Gradle 9 rejects a `Test` task with no discovered tests**, which broke
+   `:libs:contracts:integrationTest` (no `*IT` classes there). Fixed with
+   `failOnNoDiscoveredTests = false`.
+4. **`jacocoTestReport` read `integrationTest.exec` without declaring the dependency**, which
+   Gradle refuses. Fixed with `mustRunAfter(integrationTest)`: an ordering, not a dependency,
+   so the report still does not force the slow task to run.
+
+### Honest gaps
+
+- The record-timestamp assertion proves the broker **stored** `occurredAt`. It does not prove
+  the broker's `log.message.timestamp.*` limits accept arbitrarily old events; the test event
+  is from January and passed, which is evidence for this broker version only.
+- The single broker cannot lose a replica. `acks=all` is asserted as configuration, not as
+  behaviour under failure.
+- `moto` is now pinned to `5.2.2` (was `latest`, which was a `5.2.3.dev` build). The Kinesis
+  ITs passed against it; I did not compare behaviour with the old `latest`.
+
+
+---
+
+## Phase 3 · Days 2-5 — stream processor, sink, query API, load run · 2026-10-12 · ✅
+
+Day 2 I built myself; Days 3 and 4 and the load generator were built by three agents working in
+parallel in this tree (one module each); the docs by a fourth. **I re-ran every test myself from
+scratch. The sink-writer and query-api mutation checks below are the agents' reports, not mine;
+the Day 2 mutation checks I ran.**
+
+### Everything, from scratch
+
+```
+$ ./gradlew spotlessApply test integrationTest --rerun-tasks
+BUILD SUCCESSFUL in 2m 45s
+```
+
+```
+module                      task               tests  skip  fail  err
+libs/platform               test                  39     0     0    0
+libs/contracts              test                  32     0     0    0
+services/ingest-gateway     test                  58     0     0    0
+services/ingest-gateway     integrationTest       29     0     0    0
+services/stream-processor   test                  39     0     0    0
+services/stream-processor   integrationTest        1     0     0    0
+services/sink-writer        test                 148     0     0    0
+services/sink-writer        integrationTest        8     0     0    0
+services/query-api          test                  36     0     0    0
+services/query-api          integrationTest       10     0     0    0
+tools/loadgen               test                  60     0     0    0
+TOTAL                                            460     0     0    0
+```
+
+Was 158 at the end of Day 1.
+
+### Day 2 · services/stream-processor
+
+`TopologyTestDriver` (in memory, no broker) proves the logic. `StreamProcessorIT` runs the real
+app on a real broker with `processing.guarantee=exactly_once_v2`: one final record per metric, a
+retried duplicate counted once, garbage bytes on the DLT with `dlt-reason=UNDECODABLE`.
+
+Mutation checks, run by me, restored after each:
+
+| Mutation | Result |
+|---|---|
+| remove `suppress(untilWindowCloses)` | 8 `TelemetryTopologyTest` tests failed |
+| grace period 5 s to 0 | 2 failed (`outOfOrderWithinGraceIsCounted`, `noOutputBeforeWindowCloses`) |
+| deduplicator never remembers an id | 1 failed (`duplicateEventIdCountedOnce`) |
+
+Things that went wrong:
+- **Bean name clash.** Spring Boot's `SystemMetricsAutoConfiguration` already defines a bean named
+  `processorMetrics` (CPU metrics). Mine failed the context at startup. Renamed `pipelineMetrics`.
+- **`@TempDir` and RocksDB.** JUnit deletes a `@TempDir` when the class ends; Spring closes the
+  context later, so the RocksDB flush logged errors against a deleted directory. The test passed
+  anyway, which is why it was easy to miss. State dir moved under `build/`.
+- Event ids must be UUIDs (the platform `EventId` rule, reused by the validator). My first test
+  fixtures used `e-1` and were rightly rejected.
+
+### Days 3-4 · services/sink-writer, services/query-api (agent reports; tests re-run by me)
+
+- **sink-writer:** `BatchWriter` (J5); Kafka to Postgres to Redis to ack; `NoLossNoDoubleCountIT`
+  (a fault injected after the durable write and before the ack, three times: 60 rows with
+  unchanged values, committed offsets sum 60, empty DLT).
+  **Finding worth keeping:** with the lock removed, the randomised `@RepeatedTest(100)` race test
+  stayed **green** (16 and 48 threads). Only a deterministic test that stalls `offer` went red.
+  A randomised concurrency test can give false confidence. And `NoLossNoDoubleCountIT` passed on
+  its first run, so the agent made the upsert non-idempotent to prove it can fail: it did.
+- **query-api:** J6 `TitleOverviewService` (parallel fan-out inside one 300 ms deadline on a
+  bounded, rejecting executor); SSE with replay-then-live, heartbeat and coalescing. Agent's
+  mutation: removing `.orTimeout` turned `slowCallIsDegradedAndTheBudgetHolds` red.
+- Gotchas the agents hit: `@KafkaListener(id=...)` silently becomes the consumer group id (it
+  would have orphaned committed offsets); under Boot 3.5 the Netty threads are named
+  `webflux-http-nio-N`, not `reactor-http-nio-N`, so a "not on the event loop" assertion using the
+  old name passes vacuously; the flusher blocked in `poll` and nothing woke it on `close()`.
+
+### Day 5 · the whole pipeline, running
+
+Not unit tests: `make up-core`, the four services on the host, `tools/loadgen` sending real HTTP
+with a real Keycloak token. Single Kafka broker, one laptop. Nothing here is production.
+
+```
+loadgen: target 1500 events/s for 90 s, batch 100, 5000 sessions, late fraction 0.05 -> http://localhost:8080
+wall time: 90.06 s
+batches sent: 1351   offered events/s: 1500.1   accepted events/s: 1500.1
+responses: 202=1351 429=0 503=0 other=0 io-errors=0
+ingest latency (202 only): p50=50.0 ms p95=57.0 ms p99=68.7 ms
+max send lag behind schedule: 28 ms
+freshness p99: 5.71 s (estimated from histogram buckets; observations made during this run)
+ windows | min_s | p50_s | max_s 
+---------+-------+-------+-------
+       9 |   5.2 |   5.3 |   5.4
+(1 row)
+
+rows=3600 windows=9 viewers_sample_count_sum=125400
+sink-writer lag (commit markers): 6
+raw DLT records: 0
+```
+
+Per-window cross-check, straight from Postgres (`computed_at` minus `window_end`):
+
+```
+ windows | min_s | p50_s | max_s
+---------+-------+-------+-------
+       9 |   5.2 |   5.3 |   5.4
+```
+
+So steady-state freshness is the 5 s grace period plus about 0.2 to 0.4 s of pipeline. The
+loadgen's histogram estimate (5.71 s) agrees. True event-to-visible is that plus up to 10 s of
+window.
+
+By hand on the running stack: `GET /v1/titles/title-11/overview` returned 200 in 0.17 s with
+metadata and latest values; a request with no `tenantId` returned 400; the SSE endpoint with
+`Last-Event-ID: 0-0` replayed entries from the Redis stream.
+
+**Found only by running it:**
+1. **Query-api's live feed failed every idle poll** (`Redis command timed out`, forever). The
+   stream receiver's blocking read defaults to 2 s, and the Redis command timeout was also 2 s.
+   Every unit and integration test finished faster than the timeout, so none could see it. Fixed
+   by deriving the block time as half the command timeout; `LiveFeedIdleIT` is the regression
+   test (it failed for the right reason first: non-zero `readFailures()`).
+2. **My first freshness number was wrong.** p99 came out at 39.5 s. Postgres showed 10 windows for
+   a 90 s run (expected 9): one was left unclosed by my earlier smoke run and was finally emitted
+   36 s after its end when the next run advanced stream time. Re-measured after a 20 s warm-up that
+   flushes leftovers; the output above is the second run. This is the quiet-stream limit in
+   ADR-0012 appearing for real: the last window of a run never closes until later events arrive.
+3. **Consumer lag of 1 on every partition at rest.** Consistent with the transaction commit
+   marker that exactly-once writes. I did not dump the log to confirm.
+
+### Honest gaps
+
+- **1,500 events/s is the rate I offered, not a ceiling.** Ingest's per-tenant quota refills at
+  2,000 events/s, so higher rates mostly measure 429s. The saturation point, the 5xx ratio and
+  the 429 rate at saturation were not measured.
+- **Not measured:** batch flush latency, peak lag and drain time, overview p99 under load,
+  concurrent SSE streams per instance, the lz4 ratio, any MVC-vs-WebFlux comparison.
+- **No end-to-end event accounting.** The closed windows hold 125,400 viewer samples against
+  135,100 events sent, with the last 1 to 2 windows still open. The pieces are asserted
+  separately (dedup in the topology tests, `NoLossNoDoubleCountIT` in the sink), not as one
+  end-to-end invariant over a run.
+- Not tested: a processor crash mid-window; the Redis-down retry loop in query-api (observed by
+  hand only); the order of a real SIGTERM shutdown.
+- `api/openapi/ingest-v1.yaml` still describes saturation as 429; ingest returns 503 (429 is the
+  per-tenant quota only). Not changed.
+- Query-api has no authentication. Single broker, replication factor 1. No outbox, no schema
+  registry, no Kubernetes.

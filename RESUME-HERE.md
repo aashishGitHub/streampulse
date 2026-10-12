@@ -1,11 +1,14 @@
-# RESUME HERE — state of work as of 2026-09-29
+# RESUME HERE — state of work as of 2026-10-12
 
 Single place to pick the work back up.
 
-**Phase 2 is complete and merged. `main` is clean, one branch, no worktrees, 149 tests
-passing including Testcontainers integration tests against moto, Redis and Keycloak.**
+**Phase 2 is merged to `main`. Branch `phase3-kafka-slice` (uncommitted, nothing committed yet)
+holds the whole 5-day interview slice: Kafka backbone (ADR-0012), stream-processor, sink-writer,
+query-api, load generator, observability config, `docs/script.md` and `docs/deep-dive.md`.
+460 tests, 0 failures. The pipeline has been run end to end: 1,500 events/s, p99 ingest 68.7 ms,
+freshness 5.2 to 5.4 s per window. All recorded in MILESTONES.md, Phase 3 Days 2-5.**
 
-The next session starts with a design decision, not with code — see §3.
+A copy of the Day 1 diff is not kept anywhere outside the working tree: **commit this branch.**
 
 ---
 
@@ -89,21 +92,41 @@ such table. They are markdown tables now, labelled as such.
 
 ---
 
-## 3. The next session starts here — a decision, then Phase 3
+## 3. The next session starts here
 
-**The plan specifies Kafka Streams for stream processing. The pivot to Kinesis (ADR-0008)
-leaves no direct equivalent, and that choice has not been made.**
+Nothing is blocking. In priority order:
 
-| Option | Runs free + locally? | Notes |
-|---|---|---|
-| Kinesis Data Analytics (Flink) | Flink locally, yes; KDA itself, no | closest to the managed AWS story; heaviest to run |
-| Lambda consumer | via moto Lambda or `sam local` | plan already flags moto-Lambda on Mac as unverified |
-| KCL application | plan flags it as **possibly flaky against moto** | closest to "real" Kinesis consumption |
-| Keep Kafka Streams behind the `kafka` profile | yes, free | the Kafka adapter already exists; splits the story across two backbones |
+1. **Commit the branch** (nothing is committed).
+2. **Read `docs/script.md` aloud once**, then `docs/deep-dive.md`. Figures tagged
+   "(not measured: ...)" were never measured: do not quote them.
+3. **Measurements still missing** (each is a Phase 9 item): the saturation point (raise the
+   tenant quota first: it caps ingest at 2,000 events/s), flush latency and queue depth, peak lag
+   and drain time, overview p99 under load, SSE streams per instance, MVC-vs-WebFlux.
+4. **End-to-end event accounting** (every event sent appears in exactly one aggregate): asserted
+   in pieces, never over a whole run.
+5. **A processor crash mid-window**; `api/openapi/ingest-v1.yaml` still says saturation is 429
+   while ingest returns 503; query-api has no auth; no outbox, schema registry or Kubernetes.
 
-Decide this first, write ADR-0012, then follow the spec-driven loop in
-`StreamPulse_Project_Plan.md` §3: `requirements.md` → `design.md` → contracts → `tasks.md` →
-failing acceptance tests → code → MILESTONES with real output.
+To run it: `make up-core`, `make run-all`, `make wait-services`, then
+`LOADGEN_CLIENT_SECRET=<ingest-gateway client secret from docker/keycloak/realms/streampulse-realm.json> make loadgen`.
+Run a short warm-up first, or the first window of the measured run closes a leftover one and
+skews freshness (see MILESTONES, Day 5).
+
+Things learned that will bite again:
+
+- **`apache/kafka:3.9.0` does not start under Testcontainers 1.21.2** (advertised listener
+  `0.0.0.0` rejected). **3.9.1** starts. Compose and the ITs pin 3.9.1.
+- **Avro decodes strings as `Utf8`, not `String`.** `Utf8` never equals a `String`. Call
+  `toString()` before using one as a key or in a comparison.
+- **Gradle 9 fails a `Test` task that discovers no tests.** `integrationTest` sets
+  `failOnNoDiscoveredTests = false` because `libs:*` have no `*IT` classes.
+- `*IT` classes run only under `./gradlew integrationTest` (`make it`); `./gradlew test` is
+  Docker-free. `check` runs both.
+- Prometheus is on host port **9091**: ingest's gRPC server owns 9090.
+- A test that finishes faster than a timeout cannot find a timeout bug. The idle live feed
+  failed every poll in the real stack and passed every test (`LiveFeedIdleIT` now covers it).
+- A randomised concurrency test can stay green with the lock removed. Prove a concurrency test
+  by mutating the code, and prefer a deterministic one (see `BatchWriterTest`).
 
 ### Also outstanding from Phase 2 (deliberately deferred, not forgotten)
 

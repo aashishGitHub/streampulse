@@ -65,7 +65,9 @@ import software.amazon.awssdk.services.kinesis.model.ShardIteratorType;
         // BS-09 added a gRPC listener that starts with the context. Port 0 lets the OS choose
         // one, so this class cannot collide with the configured 9090 — whether that is taken
         // by another test class or by something already running on the developer's machine.
-        properties = "streampulse.ingest.grpc.port=0")
+        // These two prove the Kinesis comparison adapter against moto; Kafka is the default
+        // backbone since ADR-0012, so the switch is stated rather than inherited.
+        properties = {"streampulse.ingest.grpc.port=0", "streampulse.backbone=kinesis"})
 @org.springframework.context.annotation.Import(TestJwtSupport.class)
 @Testcontainers
 class IngestEndToEndIT {
@@ -80,7 +82,7 @@ class IngestEndToEndIT {
      */
     @Container
     static final GenericContainer<?> MOTO =
-            new GenericContainer<>(DockerImageName.parse("motoserver/moto:latest")).withExposedPorts(5000);
+            new GenericContainer<>(DockerImageName.parse("motoserver/moto:5.2.2")).withExposedPorts(5000);
 
     @Container
     static final GenericContainer<?> REDIS =

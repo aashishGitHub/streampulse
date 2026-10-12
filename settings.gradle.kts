@@ -70,3 +70,7 @@ dependencyResolutionManagement {
 include("libs:platform")
 include("libs:contracts")
 include("services:ingest-gateway")
+include("services:stream-processor")
+include("services:sink-writer")
+include("services:query-api")
+include("tools:loadgen")

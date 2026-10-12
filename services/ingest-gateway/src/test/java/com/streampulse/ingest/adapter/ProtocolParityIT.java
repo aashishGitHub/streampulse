@@ -101,10 +101,12 @@ import software.amazon.awssdk.services.kinesis.model.ShardIteratorType;
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         // Port 0: the OS picks a free one. A fixed port would collide with whatever else is
         // listening on the developer's machine, and with any other test class in the build.
-        properties = "streampulse.ingest.grpc.port=0")
+        // These two prove the Kinesis comparison adapter against moto; Kafka is the default
+        // backbone since ADR-0012, so the switch is stated rather than inherited.
+        properties = {"streampulse.ingest.grpc.port=0", "streampulse.backbone=kinesis"})
 @org.springframework.context.annotation.Import(TestJwtSupport.class)
 @Testcontainers
-class ProtocolParityTest {
+class ProtocolParityIT {
 
     private static final String STREAM = "telemetry-parity-v1";
     private static final String TENANT = "streamflix";
@@ -116,7 +118,7 @@ class ProtocolParityTest {
 
     @Container
     static final GenericContainer<?> MOTO =
-            new GenericContainer<>(DockerImageName.parse("motoserver/moto:latest")).withExposedPorts(5000);
+            new GenericContainer<>(DockerImageName.parse("motoserver/moto:5.2.2")).withExposedPorts(5000);
 
     @Container
     static final GenericContainer<?> REDIS =
@@ -130,7 +132,7 @@ class ProtocolParityTest {
     static void properties(DynamicPropertyRegistry registry) {
         registry.add("spring.data.redis.host", REDIS::getHost);
         registry.add("spring.data.redis.port", () -> REDIS.getMappedPort(6379));
-        registry.add("streampulse.aws.endpoint-override", ProtocolParityTest::motoEndpoint);
+        registry.add("streampulse.aws.endpoint-override", ProtocolParityIT::motoEndpoint);
         registry.add("streampulse.aws.kinesis-stream-name", () -> STREAM);
     }
 

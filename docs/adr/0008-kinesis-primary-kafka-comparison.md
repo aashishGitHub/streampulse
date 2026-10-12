@@ -1,6 +1,6 @@
 # ADR-0008 — Kinesis as the primary backbone, Kafka as a comparison adapter
 
-**Status:** accepted · **Date:** 2026-09-28 · **Phase:** 2 · **Supersedes part of** ADR-0003
+**Status:** superseded by [ADR-0012](0012-kafka-streams-primary.md) · **Date:** 2026-09-28 · **Phase:** 2 · **Supersedes part of** ADR-0003
 
 ## Context
 

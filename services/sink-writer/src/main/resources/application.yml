@@ -1,0 +1,108 @@
+# ============================================================================
+#  sink-writer configuration
+# ============================================================================
+
+spring:
+  application:
+    name: sink-writer
+
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+
+  # The schema is one idempotent CREATE TABLE IF NOT EXISTS; Flyway is deferred.
+  sql:
+    init:
+      mode: always
+
+  # Local-only values, as in docker/compose.yml. Real secrets never live in git.
+  datasource:
+    url: ${POSTGRES_URL:jdbc:postgresql://localhost:5432/streampulse}
+    username: ${POSTGRES_USER:streampulse}
+    password: ${POSTGRES_PASSWORD:streampulse}
+    hikari:
+      # Bounds the cost of an outage: the writer tries each record on its own, and every attempt
+      # waits this long for a connection.
+      connection-timeout: 2000
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      timeout: 2s
+      connect-timeout: 2s
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP:localhost:9092}
+    consumer:
+      group-id: sink-writer
+      # The offset is committed by the listener, after the durable write, never on a timer.
+      enable-auto-commit: false
+      # A new group must read the whole topic, not only what arrives after it joins.
+      auto-offset-reset: earliest
+      max-poll-records: 500
+      # Skip records of aborted producer transactions (the stream processor is exactly-once v2).
+      isolation-level: read_committed
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.ByteArrayDeserializer
+      properties:
+        partition.assignment.strategy: org.apache.kafka.clients.consumer.CooperativeStickyAssignor
+        # Must exceed the poll budget (30 s) plus the longest error-handler backoff (30 s) and the
+        # worst flush retry, or the broker evicts the consumer in the middle of an outage.
+        max.poll.interval.ms: 300000
+    listener:
+      type: batch
+      ack-mode: manual
+      concurrency: 3
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.ByteArraySerializer
+      acks: all
+
+server:
+  port: ${SERVER_PORT:8084}
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: always            # local only
+      group:
+        # livenessState ONLY. Postgres, Redis or Kafka being down is cured by them returning, not by
+        # restarting this process; restarting every pod when a store blips turns a blip into an outage.
+        liveness:
+          include: livenessState
+        readiness:
+          include: readinessState
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+streampulse:
+  sink:
+    aggregate-topic: telemetry.agg.v1
+    aggregate-dlt-topic: telemetry.agg.v1.dlt
+    # Targets until Phase 9 measures them.
+    batch:
+      max-size: 200
+      max-wait: 100ms
+      queue-capacity: 2000
+      flush-attempts: 3
+      retry-backoff: 50ms
+      close-timeout: 20s
+    offer-timeout: 1s
+    poll-budget: 30s
+    dlt-send-timeout: 10s
+    retry:
+      initial-interval: 1s
+      multiplier: 2.0
+      max-interval: 30s
+
+logging:
+  level:
+    com.streampulse: DEBUG

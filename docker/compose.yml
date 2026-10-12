@@ -5,7 +5,7 @@
 #  running the whole estate costs roughly 8-10 GB of RAM. Start what the phase
 #  you are working on needs:
 #
-#    make up-core   Kafka, Postgres, Redis, Keycloak       (Phase 2+)
+#    make up-core   Kafka, moto, Postgres, Redis, Keycloak  (Phase 2+)
 #    make up-aws    moto, DynamoDB Local                   (Phase 4+)
 #    make up-obs    Prometheus, Grafana, Tempo, Loki       (Phase 8+)
 #    make up-full   everything
@@ -30,7 +30,7 @@ services:
   # ingest publishes to by default. Free, no AWS account, no credentials.
   # -------------------------------------------------------------------------
   moto:
-    image: motoserver/moto:latest      # VERIFY: pin a digest before relying on this in CI
+    image: motoserver/moto:5.2.2       # `latest` was a 5.2.3.dev build; 5.2.2 verified with `docker manifest inspect`
     profiles: [core]
     container_name: sp-moto
     ports:
@@ -42,12 +42,16 @@ services:
       retries: 10
 
   # -------------------------------------------------------------------------
-  # KAFKA — the comparison backbone, used under the `kafka` profile (ADR-0008).
+  # KAFKA — the PRIMARY event backbone (ADR-0012, which supersedes ADR-0008).
   # KRaft mode: no ZooKeeper, single broker for local dev.
+  #
+  # In `core` as well as `kafka`: ingest publishes here by default, and the stream
+  # processor needs it. Kinesis on moto stays available as a comparison adapter
+  # (streampulse.backbone=kinesis).
   # -------------------------------------------------------------------------
   kafka:
-    image: apache/kafka:3.9.0
-    profiles: [kafka]
+    image: apache/kafka:3.9.1
+    profiles: [core, kafka]
     container_name: sp-kafka
     ports:
       - "9092:9092"      # clients on the host connect here
@@ -65,11 +69,46 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0     # rebalance immediately in dev
+      # A topic that does not exist must FAIL, not be created on first use with 1
+      # partition and default retention. A silently auto-created telemetry.raw.v1 has
+      # one partition, which makes every ordering and scaling claim in this repo untrue.
+      # kafka-init below creates the real ones.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10
+
+  # -------------------------------------------------------------------------
+  # KAFKA-INIT — creates the topics, then exits. One-shot by design: topic
+  # definitions (partitions, retention) are infrastructure and live here, not in
+  # a service's @Bean NewTopic, because KafkaAdmin blocks service startup for its
+  # full operation timeout whenever the broker is down.
+  #
+  # Partition counts follow api/asyncapi/streampulse-topics.yaml: raw is wide
+  # because it carries every event; agg is narrow because windowing already
+  # reduced the volume.
+  # -------------------------------------------------------------------------
+  kafka-init:
+    image: apache/kafka:3.9.1
+    profiles: [core, kafka]
+    container_name: sp-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        T=/opt/kafka/bin/kafka-topics.sh
+        B=kafka:19092
+        $$T --bootstrap-server $$B --create --if-not-exists --topic telemetry.raw.v1 --partitions 12 --replication-factor 1
+        $$T --bootstrap-server $$B --create --if-not-exists --topic telemetry.agg.v1 --partitions 6 --replication-factor 1
+        $$T --bootstrap-server $$B --create --if-not-exists --topic telemetry.raw.v1.dlt --partitions 3 --replication-factor 1
+        $$T --bootstrap-server $$B --create --if-not-exists --topic telemetry.agg.v1.dlt --partitions 3 --replication-factor 1
+        $$T --bootstrap-server $$B --list
 
   # -------------------------------------------------------------------------
   # POSTGRES — control plane. wal_level=logical is required for Debezium CDC
@@ -179,9 +218,15 @@ services:
     profiles: [obs]
     container_name: sp-prometheus
     ports:
-      - "9090:9090"
+      # Host 9091, not 9090: ingest-gateway's gRPC server listens on 9090 (GRPC_PORT),
+      # so the default Prometheus port collides the moment both run on one machine.
+      - "9091:9090"
     volumes:
       - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    # Services run on the host, not in compose. Docker Desktop defines this name already; on
+    # Linux it needs this entry.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   grafana:
     image: grafana/grafana:11.4.0
@@ -192,6 +237,13 @@ services:
     environment:
       GF_SECURITY_ADMIN_PASSWORD: admin
       GF_AUTH_ANONYMOUS_ENABLED: "true"
+    volumes:
+      # Mounting /etc/grafana/provisioning replaces the image's (empty) default tree, so every
+      # provisioning file must live under observability/grafana/provisioning.
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   # -------------------------------------------------------------------------
   # UI helpers

@@ -1,0 +1,68 @@
+# ============================================================================
+#  stream-processor configuration
+# ============================================================================
+
+spring:
+  application:
+    name: stream-processor
+
+  lifecycle:
+    timeout-per-shutdown-phase: 25s
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP:localhost:9092}
+    streams:
+      application-id: stream-processor
+      state-dir: ${STATE_DIR:/tmp/streampulse/stream-processor}
+      properties:
+        # Output records, the state changelog and the consumed offsets commit in one
+        # transaction. Kafka to Kafka only: anything that reads telemetry.agg.v1 and writes
+        # elsewhere still sees at-least-once, so that consumer must be idempotent (ADR-0012).
+        processing.guarantee: exactly_once_v2
+        # A new consumer group with no committed offset must start from the beginning. The
+        # default would skip everything already on the topic.
+        auto.offset.reset: earliest
+
+server:
+  port: ${SERVER_PORT:8083}
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: always            # local only
+      group:
+        # livenessState ONLY. A stopped stream thread is cured by the broker returning, not by
+        # restarting this process; restarting every pod when the broker blips turns a blip into
+        # an outage.
+        liveness:
+          include: livenessState
+        # Includes the Kafka Streams state: unlike liveness, "can I process records right now?"
+        # is exactly what readiness asks. Rebalancing counts as ready (StreamsStateHealthIndicator).
+        readiness:
+          include: readinessState,streamsState
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+streampulse:
+  processor:
+    raw-topic: telemetry.raw.v1
+    aggregate-topic: telemetry.agg.v1
+    raw-dlt-topic: telemetry.raw.v1.dlt
+    # Targets until Phase 9 measures them. Window + grace is the floor on how soon a final
+    # aggregate can appear: 15 s after the window starts.
+    window-size: 10s
+    grace: 5s
+    # A device with a wrong clock must not be able to advance stream time past real windows.
+    max-future-skew: 5m
+
+logging:
+  level:
+    com.streampulse: DEBUG

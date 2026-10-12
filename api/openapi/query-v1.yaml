@@ -5,9 +5,12 @@ info:
   description: |
     Serves dashboards: historical metric queries and a live SSE stream.
 
-    Reads are split by access pattern. Recent windows come from Redis; anything older comes
-    from DynamoDB. The API hides which, but reports `source` so a slow response can be
-    explained rather than guessed at.
+    Reads are split by access pattern. The latest value per series comes from Redis; history
+    comes from Postgres (`metric_window`). The API hides which, but reports `source` so a slow
+    response can be explained rather than guessed at.
+
+    Authentication is declared below but NOT enforced yet: no token is validated and `tenantId`
+    is taken from the caller. This is a known gap, not a design.
 servers:
   - url: http://localhost:8082
 security:
@@ -44,12 +47,86 @@ paths:
                         value: { type: number }
                         sampleCount: { type: integer, description: Low counts mean low confidence; the UI dims them }
                         isFinal: { type: boolean, description: False while the window may still receive late events }
+                        titleId: { type: string, description: Empty when the aggregate has no title }
+                        region: { type: string }
                   source:
                     type: string
                     enum: [cache, store, mixed]
                     description: Which tier answered. Exposed for debugging latency, not for clients to branch on.
+        '400':
+          description: Missing or unparseable parameter, or `from` not before `to`
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/ProblemDetail' } } }
         '404':
-          description: Unknown tenant or metric
+          description: A metric the system does not produce
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/ProblemDetail' } } }
+        '503':
+          description: Blocking capacity is exhausted; retry shortly
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/ProblemDetail' } } }
+
+  /v1/titles/{titleId}/overview:
+    get:
+      operationId: getTitleOverview
+      summary: Latest metrics, recent history and metadata for one title, in one call
+      description: |
+        Three independent lookups run concurrently under ONE overall time budget (a 300 ms
+        target, measured from the arrival of the request). A lookup that fails or misses the
+        budget is replaced by an empty value and named in `degraded`; the response is still 200.
+        When every lookup fails the response is still 200 with all three names in `degraded`.
+        Clients must treat an empty part together with its name in `degraded` as "unknown", not "none".
+      parameters:
+        - { name: titleId, in: path, required: true, schema: { type: string } }
+        - { name: tenantId, in: query, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: The overview, possibly degraded
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tenantId, titleId, latest, history, degraded]
+                properties:
+                  tenantId: { type: string }
+                  titleId: { type: string }
+                  metadata:
+                    description: Null when `metadata` is listed in `degraded`
+                    oneOf:
+                      - type: 'null'
+                      - type: object
+                        properties:
+                          titleId: { type: string }
+                          name: { type: string }
+                  latest:
+                    type: array
+                    description: Newest window per series (region and metric) for this title
+                    items:
+                      type: object
+                      properties:
+                        titleId: { type: string }
+                        region: { type: string }
+                        metric: { type: string }
+                        windowStart: { type: string, format: date-time }
+                        windowEnd: { type: string, format: date-time }
+                        value: { type: number }
+                        sampleCount: { type: integer }
+                        computedAt: { type: string, format: date-time }
+                  history:
+                    type: array
+                    description: Recent windows for this title, oldest first
+                    items:
+                      type: object
+                      properties:
+                        titleId: { type: string }
+                        region: { type: string }
+                        metric: { type: string }
+                        windowStart: { type: string, format: date-time }
+                        value: { type: number }
+                        sampleCount: { type: integer }
+                  degraded:
+                    type: array
+                    description: Parts that are empty because they FAILED or timed out, not because there is no data
+                    items: { type: string, enum: [latest, history, metadata] }
+        '400':
+          description: Missing or blank `tenantId`
           content: { application/problem+json: { schema: { $ref: '#/components/schemas/ProblemDetail' } } }
 
   /v1/stream/metrics:
@@ -79,6 +156,9 @@ paths:
           content:
             text/event-stream:
               schema: { type: string }
+        '400':
+          description: Missing `tenantId`, or a `Last-Event-ID` that is not a stream entry id
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/ProblemDetail' } } }
 components:
   securitySchemes:
     bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }

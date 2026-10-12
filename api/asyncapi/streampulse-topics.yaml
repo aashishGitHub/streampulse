@@ -58,8 +58,13 @@ channels:
     description: |
       Output of the Kafka Streams topology.
 
-      **Key: `tenantId:titleId:windowStart`.** A late event re-emits the same window, so a
-      keyed record overwrites the earlier provisional value instead of double-counting.
+      **Key: `tenantId:titleId:region:metric:windowStart`.** One record per metric per window.
+      Consumers upsert by this key, so a redelivered record overwrites itself instead of
+      double-counting.
+
+      Only FINAL windows are published (`isFinal=true`): the topology suppresses output until
+      the window plus its grace period has closed. Anything arriving later is dropped, not
+      re-emitted.
 
       6 partitions: far lower volume than raw, and aggregation has already collapsed the
       cardinality.
@@ -128,12 +133,37 @@ channels:
 
       Records keep their original key and carry the original topic, partition, offset and
       the exception in headers, so a message can be diagnosed and replayed.
+
+      The value is the ORIGINAL BYTES, unchanged. A record that failed to decode cannot be
+      re-encoded, so a consumer of this topic must not assume the value is a valid Avro
+      TelemetryEvent. Header `dlt-reason` says why it was rejected.
     messages:
       telemetryEvent:
         $ref: '#/components/messages/TelemetryEvent'
     bindings:
       kafka:
         topic: telemetry.raw.v1.dlt
+        partitions: 3
+        replicas: 1
+
+  telemetryAggDlt:
+    address: telemetry.agg.v1.dlt
+    title: Dead-letter topic for aggregates
+    description: |
+      Aggregates the sink-writer could not store because the RECORD itself is bad: an
+      undecodable value, or a value the store rejects deterministically.
+
+      An outage of the store is NOT a reason to dead-letter. A healthy record must never go
+      here because Postgres was down; the sink retries those until the store recovers
+      (ADR-0013).
+
+      Original bytes and key are preserved, with the same diagnostic headers as the raw DLT.
+    messages:
+      metricAggregate:
+        $ref: '#/components/messages/MetricAggregate'
+    bindings:
+      kafka:
+        topic: telemetry.agg.v1.dlt
         partitions: 3
         replicas: 1
 
@@ -150,6 +180,10 @@ operations:
     action: send
     channel: { $ref: '#/channels/telemetryAgg' }
     summary: stream-processor publishes windowed aggregates
+  consumeAggregates:
+    action: receive
+    channel: { $ref: '#/channels/telemetryAgg' }
+    summary: sink-writer stores each aggregate durably, then commits its offset
   publishAlerts:
     action: send
     channel: { $ref: '#/channels/alerts' }

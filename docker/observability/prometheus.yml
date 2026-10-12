@@ -1,13 +1,31 @@
-# Minimal Prometheus config. Phase 8 adds real scrape targets and recording rules.
 global:
-  scrape_interval: 15s
+  scrape_interval: 5s
   evaluation_interval: 15s
 
+# The services run on the host (./gradlew bootRun), not in compose, so the container
+# reaches them through host.docker.internal. On Linux that name needs the
+# extra_hosts entry in COMPOSE-SNIPPET.md.
 scrape_configs:
   - job_name: prometheus
     static_configs:
       - targets: ['localhost:9090']
-  # Services are added here as each phase brings one online, e.g.:
-  # - job_name: ingest-gateway
-  #   metrics_path: /actuator/prometheus
-  #   static_configs: [{ targets: ['host.docker.internal:8080'] }]
+
+  - job_name: ingest-gateway
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['host.docker.internal:8080']
+
+  - job_name: query-api
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['host.docker.internal:8082']
+
+  - job_name: stream-processor
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['host.docker.internal:8083']
+
+  - job_name: sink-writer
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['host.docker.internal:8084']

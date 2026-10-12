@@ -63,7 +63,8 @@ spring:
           max-active: 16
           max-wait: 200ms
 
-  # Kafka is only used under the "kafka" profile (ADR-0008). Kinesis is the default.
+  # Kafka is the default backbone (ADR-0012). `streampulse.backbone: kinesis` switches to
+  # the Kinesis-on-moto comparison adapter.
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP:localhost:9092}
     producer:
@@ -150,6 +151,10 @@ management:
   metrics:
     tags:
       application: ${spring.application.name}
+    distribution:
+      # Without a histogram only mean and max exist, and a p99 panel has nothing to compute from.
+      percentiles-histogram:
+        http.server.requests: true
 
 # ---------------------------------------------------------------------------
 # Our own settings. Typed and validated in IngestProperties, so a missing or
@@ -166,6 +171,8 @@ management:
 # No IAM enforcement, no throttling, meaningless latency. See ADR-0003.
 # ---------------------------------------------------------------------------
 streampulse:
+  backbone: ${STREAMPULSE_BACKBONE:kafka}   # kafka | kinesis
+
   aws:
     endpoint-override: ${AWS_ENDPOINT_OVERRIDE:http://localhost:5001}
     region: ${AWS_REGION:us-east-1}

@@ -2,16 +2,12 @@
 
 package com.streampulse.ingest.adapter.out.kafka;
 
+import com.streampulse.contracts.codec.AvroBinaryCodec;
 import com.streampulse.contracts.v1.TelemetryEvent;
 import com.streampulse.ingest.domain.EventPublisher;
 import com.streampulse.ingest.domain.IngestCommand;
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.util.concurrent.CompletableFuture;
-import org.apache.avro.io.BinaryEncoder;
-import org.apache.avro.io.EncoderFactory;
-import org.apache.avro.specific.SpecificDatumWriter;
+import org.apache.kafka.clients.producer.ProducerRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -43,6 +39,7 @@ public class KafkaEventPublisher implements EventPublisher {
     private final KafkaTemplate<String, byte[]> kafka;
     private final String topic;
     private final AvroEventMapper mapper;
+    private final AvroBinaryCodec<TelemetryEvent> codec = AvroBinaryCodec.of(TelemetryEvent.class);
 
     public KafkaEventPublisher(KafkaTemplate<String, byte[]> kafka, String topic, AvroEventMapper mapper) {
         this.kafka = kafka;
@@ -68,38 +65,23 @@ public class KafkaEventPublisher implements EventPublisher {
 
     private CompletableFuture<?> send(String tenantId, IngestCommand.IngestEvent event) {
         TelemetryEvent avro = mapper.toAvro(tenantId, event);
-        byte[] value = serialize(avro);
+        byte[] value = codec.encode(avro);
 
         // The KEY is what decides the partition, and therefore the ordering guarantee.
         // sessionId keeps one viewing session on one partition. See specs/01-contracts/design.md.
-        return kafka.send(topic, event.partitionKey(), value).whenComplete((result, failure) -> {
+        //
+        // The record TIMESTAMP is the event's occurredAt, not the broker's append time.
+        // Kafka Streams windows on the record timestamp by default, so stamping it here
+        // gives the processor event time without a custom extractor that decodes the
+        // payload a second time. Requires the topic's message.timestamp.type=CreateTime,
+        // which is the default.
+        var record = new ProducerRecord<>(topic, null, event.occurredAt().toEpochMilli(), event.partitionKey(), value);
+        return kafka.send(record).whenComplete((result, failure) -> {
             if (failure != null) {
                 // Log the KEY, never the payload: payloads are large and may carry data we
                 // should not spray into logs.
                 log.error("Failed to publish event key={} to {}", event.partitionKey(), topic, failure);
             }
         });
-    }
-
-    /**
-     * Avro binary encoding.
-     *
-     * <p>Phase 2 writes the raw encoding. Phase 3 adds Schema Registry, which prefixes a
-     * magic byte and a 4-byte schema id so consumers can resolve the writer's schema. Doing
-     * it by hand here keeps the phase free of another running dependency.
-     */
-    private byte[] serialize(TelemetryEvent event) {
-        try {
-            var writer = new SpecificDatumWriter<TelemetryEvent>(TelemetryEvent.class);
-            var out = new ByteArrayOutputStream();
-            BinaryEncoder encoder = EncoderFactory.get().binaryEncoder(out, null);
-            writer.write(event, encoder);
-            encoder.flush();
-            return out.toByteArray();
-        } catch (IOException e) {
-            // A serialization failure is a programming error, not a transient fault —
-            // retrying cannot help, so it must not be swallowed into a retry loop.
-            throw new UncheckedIOException("Failed to serialize event " + event.getEventId(), e);
-        }
     }
 }

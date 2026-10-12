@@ -118,10 +118,10 @@ code**, so "done" is a fact rather than an opinion.
 |---|---|---|
 | **0** | Build foundation, conventions, domain primitives, architecture rules | ✅ done |
 | **1** | Contracts & schemas (Avro, OpenAPI, AsyncAPI) | ✅ done |
-| 2 | Ingest gateway (MVC + virtual threads, gRPC, idempotency, backpressure) | ⬜ |
-| 3 | Stream processing (Kafka Streams, windowing, exactly-once) | ⬜ |
-| 4 | Sinks & storage (Redis, DynamoDB, S3, DLT) | ⬜ |
-| 5 | Query API + live SSE | ⬜ |
+| **2** | Ingest gateway (MVC + virtual threads, gRPC, idempotency, backpressure) | ✅ done |
+| **3** | Stream processing (Kafka Streams, windowing, exactly-once) | ✅ done (ADR-0012) |
+| **4** | Sinks & storage: sink-writer, batch writer, Postgres + Redis, DLT (DynamoDB/S3 not built) | ✅ done |
+| **5** | Query API + live SSE (no auth) | ✅ done |
 | 6 | Control plane, Debezium CDC, alert engine | ⬜ |
 | 7 | React dashboard | ⬜ |
 | 8 | Observability, SLOs, error budgets | ⬜ |
