@@ -2,6 +2,16 @@ global:
   scrape_interval: 5s
   evaluation_interval: 15s
 
+# Recording rules (the SLIs) and alerts. Mounted by compose.obs.yml; the glob matching nothing,
+# as in a stack started without that file, is not an error.
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+# Scrape jobs for the telemetry stack itself (collector, Tempo, Loki). A separate file so that
+# a stack without them has no permanently-down targets.
+scrape_config_files:
+  - /etc/prometheus/scrape.d/*.yml
+
 # The services run on the host (./gradlew bootRun), not in compose, so the container
 # reaches them through host.docker.internal. On Linux that name needs the
 # extra_hosts entry in COMPOSE-SNIPPET.md.

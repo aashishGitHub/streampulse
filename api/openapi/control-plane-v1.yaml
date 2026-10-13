@@ -3,7 +3,7 @@ info:
   title: StreamPulse Control Plane API
   version: 1.0.0
   description: |
-    Administrative CRUD for tenants, titles and alert rules.
+    Administrative CRUD for tenants (and their tree), apps, titles, alert rules and service nodes.
 
     Every write also inserts a row into the transactional **outbox** in the SAME database
     transaction. Debezium relays that row to `config.changes.v1`, which is how the rest of
@@ -12,9 +12,12 @@ info:
     Why not just publish to Kafka after committing? Because "commit, then publish" has no
     atomicity: a crash between the two leaves the database and the topic permanently
     disagreeing, and no amount of try/catch fixes it. The outbox makes the change and its
-    announcement one atomic act. See docs/adr and interview-qa/07-cdc-outbox-sse.md.
+    announcement one atomic act. See docs/adr/0015 and 0016, and specs/06-control-plane.
+
+    Authentication is declared below but NOT enforced by this service yet (an honest gap).
+    Billing usage is deferred: that operation answers 501 rather than invent figures.
 servers:
-  - url: http://localhost:8083
+  - url: http://localhost:8085
 security:
   - bearerAuth: []
 paths:
@@ -26,61 +29,331 @@ paths:
         '200':
           description: OK
           content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Tenant' } } } }
+
     post:
       operationId: createTenant
       summary: Create a tenant
+      description: |
+        A parentTenantId must name an existing tenant (422 otherwise). The id `tree` is reserved (400).
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: '#/components/schemas/Tenant' } } }
       responses:
-        '201': { description: Created }
-        '409':
-          description: Tenant id already exists
-          content: { application/problem+json: { schema: { $ref: '#/components/schemas/ProblemDetail' } } }
-
+        '201':
+          description: Created
+          content: { application/json: { schema: { $ref: '#/components/schemas/Tenant' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
   /v1/admin/tenants/tree:
     get:
       operationId: getTenantTree
-      summary: Tenants with their apps and titles
+      summary: Tenants with their apps and titles, nested by parent
       description: |
-        The N+1 lab (BS-05 / REQ-DL-03). The naive implementation issues one query per
-        tenant, then one per app; `TenantTreeQueryCountTest` asserts the whole response
-        costs at most 3 SQL statements regardless of how many tenants exist.
+        The N+1 lab (BS-05 / REQ-CP-05). The naive implementation issues one query per
+        tenant per lazy collection (1 + 2N); `TenantTreeQueryCountIT` reproduces that and asserts
+        the whole response costs at most 3 SQL statements regardless of how many tenants exist.
       responses:
-        '200': { description: OK }
+        '200':
+          description: OK
+          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/TenantTreeNode' } } } }
 
+  /v1/admin/tenants/{tenantId}:
+    get:
+      operationId: getTenant
+      summary: Read a tenant
+      parameters:
+        - { name: tenantId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/Tenant' } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      operationId: updateTenant
+      summary: Update a tenant
+      description: |
+        Setting a parent that is the tenant itself or one of its descendants answers 422 (a tenant is never its own ancestor).
+      parameters:
+        - { name: tenantId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/TenantUpdate' } } }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/Tenant' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+    delete:
+      operationId: deleteTenant
+      summary: Delete a tenant
+      description: |
+        409 while the tenant still has children, apps, titles, alert rules or service nodes.
+      parameters:
+        - { name: tenantId, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /v1/admin/tenants/{tenantId}/apps:
+    get:
+      operationId: listApps
+      summary: List a tenant's apps
+      parameters:
+        - { name: tenantId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/App' } } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      operationId: createApp
+      summary: Create an app
+      parameters:
+        - { name: tenantId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/AppCreate' } } }
+      responses:
+        '201':
+          description: Created
+          content: { application/json: { schema: { $ref: '#/components/schemas/App' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /v1/admin/tenants/{tenantId}/apps/{appId}:
+    delete:
+      operationId: deleteApp
+      summary: Delete an app
+      parameters:
+        - { name: tenantId, in: path, required: true, schema: { type: string } }
+        - { name: appId, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/admin/titles:
+    get:
+      operationId: listTitles
+      summary: List titles, optionally of one tenant
+      parameters:
+        - { name: tenantId, in: query, required: false, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Title' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+    post:
+      operationId: createTitle
+      summary: Create a title
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/Title' } } }
+      responses:
+        '201':
+          description: Created
+          content: { application/json: { schema: { $ref: '#/components/schemas/Title' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /v1/admin/titles/{titleId}:
+    get:
+      operationId: getTitle
+      summary: Read a title
+      parameters:
+        - { name: titleId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/Title' } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      operationId: updateTitle
+      summary: Update a title
+      parameters:
+        - { name: titleId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/TitleUpdate' } } }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/Title' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      operationId: deleteTitle
+      summary: Delete a title
+      parameters:
+        - { name: titleId, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
   /v1/admin/rules:
+    get:
+      operationId: listAlertRules
+      summary: List alert rules, optionally of one tenant
+      description: |
+        Each rule carries its upstream categories; the number of SQL statements does not grow with the number of rules (`AlertRuleQueryCountIT`).
+      parameters:
+        - { name: tenantId, in: query, required: false, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/AlertRule' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
     post:
       operationId: createAlertRule
       summary: Create an alert rule
       description: |
-        Rejects a rule whose dependencies would form a cycle. Detected with a topological
-        sort at save time — because a cyclic dependency graph makes the BFS root-cause
-        suppression in the alert engine non-terminating.
+        Rejects a rule whose dependencies would form a cycle among the tenant's rules (422).
+        Detected with a topological sort at save time, because a cyclic dependency graph makes the
+        BFS root-cause suppression in the alert engine non-terminating.
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: '#/components/schemas/AlertRule' } } }
       responses:
-        '201': { description: Created }
-        '422':
-          description: The rule would introduce a dependency cycle
-          content: { application/problem+json: { schema: { $ref: '#/components/schemas/ProblemDetail' } } }
-
+        '201':
+          description: Created
+          content: { application/json: { schema: { $ref: '#/components/schemas/AlertRule' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /v1/admin/rules/{ruleId}:
+    get:
+      operationId: getAlertRule
+      summary: Read an alert rule
+      parameters:
+        - { name: ruleId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/AlertRule' } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      operationId: updateAlertRule
+      summary: Update an alert rule
+      description: |
+        The tenant of a rule cannot be changed. The cycle check applies as on create.
+      parameters:
+        - { name: ruleId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/AlertRuleUpdate' } } }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/AlertRule' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+    delete:
+      operationId: deleteAlertRule
+      summary: Delete an alert rule
+      parameters:
+        - { name: ruleId, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /v1/admin/service-nodes:
+    get:
+      operationId: listServiceNodes
+      summary: List service nodes, optionally of one tenant
+      parameters:
+        - { name: tenantId, in: query, required: false, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/ServiceNode' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+    post:
+      operationId: createServiceNode
+      summary: Create a service node
+      description: |
+        dependsOn names other nodes of the SAME tenant; an unknown or foreign node, or a cycle, answers 422.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ServiceNode' } } }
+      responses:
+        '201':
+          description: Created
+          content: { application/json: { schema: { $ref: '#/components/schemas/ServiceNode' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+  /v1/admin/service-nodes/{nodeId}:
+    get:
+      operationId: getServiceNode
+      summary: Read a service node
+      parameters:
+        - { name: nodeId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/ServiceNode' } } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      operationId: updateServiceNode
+      summary: Update a service node
+      parameters:
+        - { name: nodeId, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ServiceNodeUpdate' } } }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/ServiceNode' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/Unprocessable' }
+    delete:
+      operationId: deleteServiceNode
+      summary: Delete a service node
+      description: |
+        409 while another node depends on it.
+      parameters:
+        - { name: nodeId, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
   /v1/billing/usage:
     get:
       operationId: getUsage
-      summary: Per-tenant usage for a month
+      summary: Per-tenant usage for a month (DEFERRED)
       description: |
-        Heavy aggregate over `usage_hourly`. Deliberately implemented with hand-written SQL
-        via JdbcClient rather than JPA — the ADR records the benchmark that justified it.
+        Not implemented, deliberately (REQ-CP-24). No usage aggregate exists in this repo and the only
+        candidate source, `metric_window`, belongs to the sink writer. The operation answers 501 with a
+        problem+json that says so, instead of returning invented or empty figures.
       parameters:
         - { name: month, in: query, required: true, schema: { type: string, pattern: '^\d{4}-\d{2}$' } }
       responses:
-        '200': { description: OK }
+        '501':
+          description: Deferred
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/ProblemDetail' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
 
 components:
   securitySchemes:
     bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT }
+  responses:
+    BadRequest:
+      description: Malformed or invalid request; validation failures list each field in `errors`
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/ProblemDetail' } } }
+    NotFound:
+      description: The entity (or its tenant) does not exist
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/ProblemDetail' } } }
+    Conflict:
+      description: Id already exists, the entity is still referenced, or a concurrent modification
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/ProblemDetail' } } }
+    Unprocessable:
+      description: A domain rule would be broken (cycle, missing parent, dependency on another tenant)
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/ProblemDetail' } } }
   schemas:
     Tenant:
       type: object
@@ -89,27 +362,105 @@ components:
         tenantId:
           type: string
           pattern: '^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$'
-          description: Must match com.streampulse.platform.domain.TenantId — this value becomes a Kafka key, a Redis prefix, a DynamoDB partition key, an S3 prefix and a Prometheus label.
-        displayName: { type: string }
-        monthlyEventQuota: { type: integer, format: int64 }
+          description: Must match com.streampulse.platform.domain.TenantId — this value becomes a Kafka key, a Redis prefix, a DynamoDB partition key, an S3 prefix and a Prometheus label. `tree` is reserved.
+        displayName: { type: string, maxLength: 120 }
+        monthlyEventQuota: { type: integer, format: int64, minimum: 0 }
+        parentTenantId: { type: string, pattern: '^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$', description: Must exist; never the tenant itself or a descendant. }
+        version: { type: integer, format: int64, readOnly: true }
+    TenantUpdate:
+      type: object
+      required: [displayName]
+      properties:
+        displayName: { type: string, maxLength: 120 }
+        monthlyEventQuota: { type: integer, format: int64, minimum: 0 }
+        parentTenantId: { type: string, pattern: '^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$' }
+    TenantTreeNode:
+      type: object
+      properties:
+        tenant: { $ref: '#/components/schemas/Tenant' }
+        apps: { type: array, items: { $ref: '#/components/schemas/App' } }
+        titles: { type: array, items: { $ref: '#/components/schemas/Title' } }
+        children: { type: array, items: { $ref: '#/components/schemas/TenantTreeNode' } }
+    AppCreate:
+      type: object
+      required: [appId, name, platform]
+      properties:
+        appId: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$' }
+        name: { type: string, maxLength: 120 }
+        platform: { type: string, enum: [WEB, IOS, ANDROID, TV] }
+    App:
+      type: object
+      properties:
+        appId: { type: string }
+        tenantId: { type: string }
+        name: { type: string }
+        platform: { type: string, enum: [WEB, IOS, ANDROID, TV] }
+    Title:
+      type: object
+      required: [titleId, tenantId, name, kind]
+      properties:
+        titleId: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$' }
+        tenantId: { type: string, pattern: '^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$' }
+        name: { type: string, maxLength: 200 }
+        kind: { type: string, enum: [VOD, LIVE] }
+        version: { type: integer, format: int64, readOnly: true }
+    TitleUpdate:
+      type: object
+      required: [name, kind]
+      properties:
+        name: { type: string, maxLength: 200 }
+        kind: { type: string, enum: [VOD, LIVE] }
     AlertRule:
       type: object
       required: [ruleId, tenantId, metric, threshold]
       properties:
-        ruleId: { type: string }
-        tenantId: { type: string }
-        metric: { type: string }
-        comparator: { type: string, enum: [GT, GTE, LT, LTE] }
+        ruleId: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$' }
+        tenantId: { type: string, pattern: '^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$' }
+        metric: { type: string, maxLength: 120 }
+        comparator: { type: string, enum: [GT, GTE, LT, LTE], default: GT }
         threshold: { type: number }
-        severity: { type: string, enum: [INFO, WARNING, CRITICAL] }
+        severity: { type: string, enum: [INFO, WARNING, CRITICAL], default: WARNING }
         category:
           type: string
           enum: [CDN, PACKAGER, PLAYER, INGEST, PIPELINE]
-          description: Node in the service dependency graph, used for root-cause suppression.
+          description: Node in the service dependency graph, used for root-cause suppression. Required when dependsOn is non-empty.
         dependsOn:
           type: array
-          items: { type: string }
-          description: Upstream categories. A cycle here is rejected at save time.
+          uniqueItems: true
+          items: { type: string, enum: [CDN, PACKAGER, PLAYER, INGEST, PIPELINE] }
+          description: Upstream categories. A cycle across the tenant's rules is rejected at save time (422).
+        version: { type: integer, format: int64, readOnly: true }
+    AlertRuleUpdate:
+      type: object
+      required: [metric, threshold]
+      properties:
+        metric: { type: string, maxLength: 120 }
+        comparator: { type: string, enum: [GT, GTE, LT, LTE] }
+        threshold: { type: number }
+        severity: { type: string, enum: [INFO, WARNING, CRITICAL] }
+        category: { type: string, enum: [CDN, PACKAGER, PLAYER, INGEST, PIPELINE] }
+        dependsOn: { type: array, uniqueItems: true, items: { type: string, enum: [CDN, PACKAGER, PLAYER, INGEST, PIPELINE] } }
+    ServiceNode:
+      type: object
+      required: [nodeId, tenantId, name, category]
+      properties:
+        nodeId: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$' }
+        tenantId: { type: string, pattern: '^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$' }
+        name: { type: string, maxLength: 120 }
+        category: { type: string, enum: [CDN, PACKAGER, PLAYER, INGEST, PIPELINE] }
+        dependsOn:
+          type: array
+          uniqueItems: true
+          items: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$' }
+          description: Upstream node ids of the same tenant.
+        version: { type: integer, format: int64, readOnly: true }
+    ServiceNodeUpdate:
+      type: object
+      required: [name, category]
+      properties:
+        name: { type: string, maxLength: 120 }
+        category: { type: string, enum: [CDN, PACKAGER, PLAYER, INGEST, PIPELINE] }
+        dependsOn: { type: array, uniqueItems: true, items: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$' } }
     ProblemDetail:
       type: object
       properties:
@@ -117,4 +468,7 @@ components:
         title: { type: string }
         status: { type: integer }
         detail: { type: string }
-        traceId: { type: string }
+        errors:
+          type: array
+          items: { type: string }
+          description: "Present on validation failures: `field: message` per offending field."

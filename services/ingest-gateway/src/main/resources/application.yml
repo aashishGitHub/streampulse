@@ -238,3 +238,19 @@ streampulse:
 logging:
   level:
     com.streampulse: DEBUG
+
+---
+# >>> structured-logging (Phase 8, opt-in) >>>
+# Off by default: plain console output stays the default for local runs and tests. Enable with
+# SPRING_PROFILES_ACTIVE=json-logs, or LOGGING_STRUCTURED_FORMAT_CONSOLE=ecs with no profile.
+# ecs prints one JSON object per line and includes every MDC entry, so the OpenTelemetry agent's
+# trace_id, span_id and trace_flags appear as top-level fields.
+spring:
+  config:
+    activate:
+      on-profile: json-logs
+logging:
+  structured:
+    format:
+      console: ecs
+# <<< structured-logging <<<

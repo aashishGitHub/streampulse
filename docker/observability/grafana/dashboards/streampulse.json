@@ -2,18 +2,19 @@
   "id": null,
   "uid": "streampulse-pipeline",
   "title": "StreamPulse Pipeline",
-  "description": "End-to-end pipeline health: ingest, consumer lag, freshness, dead letters, sink queue.",
+  "description": "End-to-end pipeline health: ingest, consumer lag, freshness, dead letters, sink queue. Uses raw metrics only, so it works without the recording rules.",
   "tags": [
-    "streampulse"
+    "streampulse",
+    "pipeline"
   ],
   "timezone": "browser",
   "editable": true,
   "graphTooltip": 1,
   "schemaVersion": 39,
-  "version": 1,
-  "refresh": "5s",
+  "version": 2,
+  "refresh": "10s",
   "time": {
-    "from": "now-15m",
+    "from": "now-30m",
     "to": "now"
   },
   "templating": {
@@ -26,9 +27,22 @@
   "panels": [
     {
       "id": 1,
+      "type": "row",
+      "title": "Ingest",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "id": 2,
       "type": "timeseries",
-      "title": "Ingest accepted events/s",
-      "description": "Rate of streampulse_ingest_events_published_total (events published to the backbone).",
+      "title": "Ingest events/s",
+      "description": "Accepted events (published to Kafka) against events turned away. rejected = gateway saturated (503); throttled = tenant over quota (429); duplicates = client retries recognised by the dedup store.",
       "datasource": {
         "type": "prometheus",
         "uid": "streampulse-prometheus"
@@ -37,7 +51,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 0
+        "y": 1
       },
       "targets": [
         {
@@ -46,8 +60,41 @@
             "type": "prometheus",
             "uid": "streampulse-prometheus"
           },
-          "expr": "sum(rate(streampulse_ingest_events_published_total[1m]))",
-          "legendFormat": "events/s",
+          "expr": "sum(rate(streampulse_ingest_events_published_events_total[1m]))",
+          "legendFormat": "published",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "streampulse-prometheus"
+          },
+          "expr": "sum(rate(streampulse_ingest_events_duplicates_events_total[1m]))",
+          "legendFormat": "duplicates",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "streampulse-prometheus"
+          },
+          "expr": "sum(rate(streampulse_ingest_events_rejected_events_total[1m]))",
+          "legendFormat": "rejected (503)",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "streampulse-prometheus"
+          },
+          "expr": "sum(rate(streampulse_ingest_events_throttled_events_total[1m]))",
+          "legendFormat": "throttled (429)",
           "editorMode": "code",
           "range": true
         }
@@ -78,10 +125,10 @@
       }
     },
     {
-      "id": 2,
+      "id": 3,
       "type": "timeseries",
       "title": "Ingest 5xx ratio and p99 latency",
-      "description": "5xx ratio includes 503 backpressure. p99 needs the bucket series: it stays empty unless management.metrics.distribution.percentiles-histogram.http.server.requests=true is set on ingest-gateway; the mean series always works.",
+      "description": "SLI for the ingest-availability SLO. 5xx ratio is 5xx over every non-4xx request and includes 503 backpressure. The p99 needs the bucket series, which only ingest-gateway publishes (management.metrics.distribution.percentiles-histogram.http.server.requests). Targets, not measurements: see docs/system-health.md.",
       "datasource": {
         "type": "prometheus",
         "uid": "streampulse-prometheus"
@@ -90,7 +137,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 0
+        "y": 1
       },
       "targets": [
         {
@@ -99,7 +146,7 @@
             "type": "prometheus",
             "uid": "streampulse-prometheus"
           },
-          "expr": "sum(rate(http_server_requests_seconds_count{job=\"ingest-gateway\",uri=\"/v1/events:batch\",status=~\"5..\"}[1m])) / sum(rate(http_server_requests_seconds_count{job=\"ingest-gateway\",uri=\"/v1/events:batch\"}[1m]))",
+          "expr": "(sum(rate(http_server_requests_seconds_count{job=\"ingest-gateway\",uri=\"/v1/events:batch\",status=~\"5..\"}[1m])) or vector(0)) / sum(rate(http_server_requests_seconds_count{job=\"ingest-gateway\",uri=\"/v1/events:batch\",status!~\"4..\"}[1m]))",
           "legendFormat": "5xx ratio",
           "editorMode": "code",
           "range": true
@@ -186,125 +233,19 @@
       }
     },
     {
-      "id": 3,
-      "type": "timeseries",
-      "title": "Consumer lag (records, max)",
-      "description": "kafka_consumer_fetch_manager_records_lag_max: Kafka's windowed maximum lag over partitions assigned to each consumer client. NaN until the first fetch.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "streampulse-prometheus"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 8
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "streampulse-prometheus"
-          },
-          "expr": "max by (job, client_id) (kafka_consumer_fetch_manager_records_lag_max)",
-          "legendFormat": "{{job}} {{client_id}}",
-          "editorMode": "code",
-          "range": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 1,
-            "fillOpacity": 10,
-            "showPoints": "never",
-            "spanNulls": false
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      }
-    },
-    {
       "id": 4,
       "type": "timeseries",
-      "title": "Freshness p99 (window end to durable write)",
-      "description": "Estimated from streampulse_sink_freshness_seconds buckets; resolution is limited by bucket width.",
+      "title": "Ingest dependency trouble",
+      "description": "Rate of batches that failed to reach Kafka, and of times the dedup store was unreachable and ingest failed open (ADR-0007): while the second is non-zero, duplicates are not being filtered.",
       "datasource": {
         "type": "prometheus",
         "uid": "streampulse-prometheus"
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 8
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "streampulse-prometheus"
-          },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(streampulse_sink_freshness_seconds_bucket[1m])))",
-          "legendFormat": "p99 freshness",
-          "editorMode": "code",
-          "range": true
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 1,
-            "fillOpacity": 10,
-            "showPoints": "never",
-            "spanNulls": false
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      }
-    },
-    {
-      "id": 5,
-      "type": "timeseries",
-      "title": "Dead-letter and rejected rate",
-      "description": "Events the processor rejected (by reason) and records the sink dead-lettered.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "streampulse-prometheus"
-      },
-      "gridPos": {
-        "h": 8,
+        "h": 7,
         "w": 12,
         "x": 0,
-        "y": 16
+        "y": 9
       },
       "targets": [
         {
@@ -313,8 +254,8 @@
             "type": "prometheus",
             "uid": "streampulse-prometheus"
           },
-          "expr": "sum by (reason) (rate(streampulse_processor_events_rejected_total[1m]))",
-          "legendFormat": "rejected: {{reason}}",
+          "expr": "sum(rate(streampulse_ingest_publish_failures_total[1m]))",
+          "legendFormat": "publish failures",
           "editorMode": "code",
           "range": true
         },
@@ -324,8 +265,8 @@
             "type": "prometheus",
             "uid": "streampulse-prometheus"
           },
-          "expr": "sum(rate(streampulse_sink_dead_letters_total[1m]))",
-          "legendFormat": "sink dead letters",
+          "expr": "sum(rate(streampulse_ingest_idempotency_unavailable_total[1m]))",
+          "legendFormat": "dedup store unavailable (fail open)",
           "editorMode": "code",
           "range": true
         }
@@ -356,10 +297,23 @@
       }
     },
     {
+      "id": 5,
+      "type": "row",
+      "title": "Stream processing and Kafka",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 16
+      },
+      "panels": []
+    },
+    {
       "id": 6,
       "type": "timeseries",
-      "title": "Batch-writer queue depth",
-      "description": "streampulse_sink_batch_queue_depth gauge: records waiting for the next flush.",
+      "title": "Consumer lag (records, max per partition)",
+      "description": "kafka_consumer_fetch_manager_records_lag_max: the largest per-partition backlog in the sampling window, measured against the fetch position, not the committed offset. Restore consumers replay changelogs after a restart and are excluded. Diagnose before scaling (see docs/runbook.md).",
       "datasource": {
         "type": "prometheus",
         "uid": "streampulse-prometheus"
@@ -367,8 +321,8 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
-        "y": 16
+        "x": 0,
+        "y": 17
       },
       "targets": [
         {
@@ -377,8 +331,8 @@
             "type": "prometheus",
             "uid": "streampulse-prometheus"
           },
-          "expr": "sum(streampulse_sink_batch_queue_depth)",
-          "legendFormat": "queue depth",
+          "expr": "max by (job) (kafka_consumer_fetch_manager_records_lag_max{job=~\"sink-writer|stream-processor\",client_id!~\".*restore-consumer.*\"})",
+          "legendFormat": "{{job}}",
           "editorMode": "code",
           "range": true
         }
@@ -386,6 +340,86 @@
       "fieldConfig": {
         "defaults": {
           "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 5000
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Processor: rejected and duplicate events/s",
+      "description": "Rejected events were dead-lettered to telemetry.raw.v1.dlt, by reason. Duplicates were dropped by eventId, which is healthy (a client retried).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "streampulse-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 17
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "streampulse-prometheus"
+          },
+          "expr": "sum by (reason) (rate(streampulse_processor_events_rejected_events_total[1m]))",
+          "legendFormat": "rejected: {{reason}}",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "streampulse-prometheus"
+          },
+          "expr": "sum(rate(streampulse_processor_events_duplicates_events_total[1m]))",
+          "legendFormat": "duplicates dropped",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
           "custom": {
             "drawStyle": "line",
             "lineWidth": 1,
@@ -406,6 +440,408 @@
           "mode": "multi",
           "sort": "none"
         }
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Consumer rebalances",
+      "description": "Rebalances per consumer group member (rate over 5m). A storm of these stalls consumption and shows up as lag.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "streampulse-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 25
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "streampulse-prometheus"
+          },
+          "expr": "sum by (job) (rate(kafka_consumer_coordinator_rebalance_total{job=~\"sink-writer|stream-processor\"}[5m]))",
+          "legendFormat": "{{job}}",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 9,
+      "type": "row",
+      "title": "Sink and freshness",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 32
+      },
+      "panels": []
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Freshness (window end to durable write)",
+      "description": "streampulse_sink_freshness: now minus window end, recorded when the batch is durable in Postgres. The floor is window + grace = 15 s (ADR-0012). Red line: the 28.6 s histogram bucket the SLO uses for its 30 s target.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "streampulse-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 33
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "streampulse-prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(streampulse_sink_freshness_seconds_bucket[1m])))",
+          "legendFormat": "p99",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "streampulse-prometheus"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(streampulse_sink_freshness_seconds_bucket[1m])))",
+          "legendFormat": "p50",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 28.633115306
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Sink dead letters and failures",
+      "description": "Dead letters are poison records parked on telemetry.agg.v1.dlt: expected to be zero, because records are validated upstream. Flush failures are failed writes to Postgres (a whole batch or a single record); projection failures are batches stored in Postgres whose Redis update failed.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "streampulse-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 33
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "streampulse-prometheus"
+          },
+          "expr": "sum(rate(streampulse_sink_dead_letters_records_total[1m]))",
+          "legendFormat": "dead letters",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "streampulse-prometheus"
+          },
+          "expr": "sum(rate(streampulse_sink_batch_flush_failures_total[1m]))",
+          "legendFormat": "flush failures",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "streampulse-prometheus"
+          },
+          "expr": "sum(rate(streampulse_sink_projection_failures_total[1m]))",
+          "legendFormat": "Redis projection failures",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Batch-writer queue depth",
+      "description": "Records waiting in the sink's bounded buffer (capacity 2000 in the sink-writer's application.yml). A full buffer stops the listener polling, which is how a slow Postgres turns into consumer lag.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "streampulse-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 41
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "streampulse-prometheus"
+          },
+          "expr": "max(streampulse_sink_batch_queue_depth_records)",
+          "legendFormat": "queue depth",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1600
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Sink flush latency",
+      "description": "One successful write of a batch to Postgres.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "streampulse-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 41
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "streampulse-prometheus"
+          },
+          "expr": "rate(streampulse_sink_batch_flush_seconds_sum[1m]) / rate(streampulse_sink_batch_flush_seconds_count[1m])",
+          "legendFormat": "mean",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "streampulse-prometheus"
+          },
+          "expr": "max(streampulse_sink_batch_flush_seconds_max)",
+          "legendFormat": "max (decaying window)",
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 14,
+      "type": "row",
+      "title": "Logs",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 48
+      },
+      "panels": []
+    },
+    {
+      "id": 15,
+      "type": "logs",
+      "title": "Warnings and errors, all services",
+      "description": "From Loki. Needs the OpenTelemetry agent exporting logs (docker/observability/README.md). Click a line's trace_id to open the trace in Tempo.",
+      "datasource": {
+        "type": "loki",
+        "uid": "streampulse-loki"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 49
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "streampulse-loki"
+          },
+          "expr": "{service_name=~\"ingest-gateway|stream-processor|sink-writer|query-api\"} | detected_level=~\"warn|error\"",
+          "queryType": "range",
+          "editorMode": "code"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending",
+        "enableLogDetails": true,
+        "dedupStrategy": "none"
       }
     }
   ]

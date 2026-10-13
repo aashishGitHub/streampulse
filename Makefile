@@ -171,6 +171,70 @@ loadgen: ## Drive load: needs LOADGEN_CLIENT_SECRET; RATE=2000 DURATION=60 by de
 demo: up-core run-all wait-services loadgen ## Everything: infrastructure, services, then load
 
 # ---------------------------------------------------------------------------
+# Control plane CDC (Phase 6): Debezium relays the control-plane outbox to config.changes.v1
+# ---------------------------------------------------------------------------
+.PHONY: up-cdc register-outbox-connector down-cdc
+up-cdc: ## Kafka, Postgres and Kafka Connect (Debezium) for the control-plane outbox
+	$(COMPOSE) --profile core --profile cdc up -d kafka kafka-init postgres connect
+
+register-outbox-connector: ## after the control plane has migrated (the outbox table must exist)
+	curl -s -X POST -H 'Content-Type: application/json' --data @docker/debezium/outbox-connector.json http://localhost:8088/connectors
+
+down-cdc: ## Stop the CDC profile
+	$(COMPOSE) --profile core --profile cdc down
+
+# ---------------------------------------------------------------------------
+# Web dashboard (Phase 7). Never run against the real backends in tests: see web/README.md
+# ---------------------------------------------------------------------------
+.PHONY: web-install web-test web-build web-e2e web-dev
+web-install: ## install web/ dependencies
+	cd web && npm ci
+
+web-test: ## typecheck, lint, unit tests for the dashboard
+	cd web && npm run typecheck && npm run lint && npm test
+
+web-build: ## production build of the dashboard
+	cd web && npm run build
+
+web-e2e: ## Playwright, network fully mocked (needs: cd web && npm run e2e:install, or PW_CHANNEL=chrome)
+	cd web && npm run e2e
+
+web-dev: ## dashboard on http://localhost:5173, proxying to 8082/8085/8086
+	cd web && npm run dev
+
+# ---------------------------------------------------------------------------
+# Terraform and the archive compactor (Phase 10). Emulators only: ADR-0019.
+# ---------------------------------------------------------------------------
+TF_DIR := infra/terraform
+.PHONY: tf-validate tf-local-plan tf-local-apply tf-local-destroy compactor-test
+tf-validate: ## fmt + validate every Terraform module and env (offline after the first init)
+	cd $(TF_DIR) && terraform fmt -recursive -check
+	@set -e; for d in modules/kinesis modules/dynamodb modules/s3 modules/sqs modules/iam modules/msk modules/vpc modules/eks envs/validate envs/local; do \
+	  echo "== $$d"; (cd $(TF_DIR)/$$d && TF_PLUGIN_CACHE_DIR=$(CURDIR)/$(TF_DIR)/.terraform-plugin-cache terraform init -backend=false -input=false >/dev/null && terraform validate); done
+
+tf-local-plan: ## plan envs/local against the compose moto (host port 5001)
+	cd $(TF_DIR)/envs/local && terraform init -input=false && terraform plan -input=false
+
+tf-local-apply: ## apply envs/local against EMULATORS ONLY (proves API-level behaviour, never AWS)
+	cd $(TF_DIR)/envs/local && terraform apply -input=false
+
+tf-local-destroy: ## destroy what tf-local-apply created
+	cd $(TF_DIR)/envs/local && terraform destroy -input=false
+
+compactor-test: ## archive-compactor unit + integration tests
+	./gradlew :functions:archive-compactor:spotlessApply :functions:archive-compactor:test :functions:archive-compactor:integrationTest
+
+# ---------------------------------------------------------------------------
+# MCP server (Phase 13): read-only tools for an AI agent, launched by .mcp.json
+# ---------------------------------------------------------------------------
+.PHONY: mcp-build mcp-test
+mcp-build: ## Build the MCP server jar that .mcp.json launches
+	./gradlew :services:mcp-server:bootJar
+
+mcp-test: ## MCP server: format, unit and protocol tests (no Docker)
+	./gradlew :services:mcp-server:spotlessApply :services:mcp-server:test :services:mcp-server:integrationTest
+
+# ---------------------------------------------------------------------------
 # Diagnostics
 # ---------------------------------------------------------------------------
 .PHONY: doctor

@@ -108,6 +108,7 @@ services:
         $$T --bootstrap-server $$B --create --if-not-exists --topic telemetry.agg.v1 --partitions 6 --replication-factor 1
         $$T --bootstrap-server $$B --create --if-not-exists --topic telemetry.raw.v1.dlt --partitions 3 --replication-factor 1
         $$T --bootstrap-server $$B --create --if-not-exists --topic telemetry.agg.v1.dlt --partitions 3 --replication-factor 1
+        $$T --bootstrap-server $$B --create --if-not-exists --topic config.changes.v1 --partitions 3 --replication-factor 1 --config cleanup.policy=compact
         $$T --bootstrap-server $$B --list
 
   # -------------------------------------------------------------------------
@@ -259,6 +260,48 @@ services:
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:19092
     depends_on:
       - kafka
+
+  # -------------------------------------------------------------------------
+  # CONNECT — Kafka Connect with the Debezium Postgres connector (Phase 6, ADR-0016).
+  # Reads the control plane's outbox rows from the Postgres write-ahead log and writes them to
+  # config.changes.v1. Needs `--profile core --profile cdc`: it depends on kafka and postgres,
+  # and on kafka-init having created config.changes.v1 (auto-create is off).
+  #
+  #   docker compose -f docker/compose.yml --profile core --profile cdc up -d
+  #   curl -X POST -H 'Content-Type: application/json' \
+  #        --data @docker/debezium/outbox-connector.json http://localhost:8088/connectors
+  #
+  # Tag verified with `docker manifest inspect` (multi-arch, amd64 and arm64). Same tag as the
+  # `debezium` entry in gradle/libs.versions.toml, which the Testcontainers CDC test uses.
+  # Host port 8088: 8083 is the stream processor's.
+  # -------------------------------------------------------------------------
+  connect:
+    image: quay.io/debezium/connect:3.0.8.Final
+    profiles: [cdc]
+    container_name: sp-connect
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8088:8083"
+    environment:
+      BOOTSTRAP_SERVERS: kafka:19092
+      GROUP_ID: sp-connect
+      CONFIG_STORAGE_TOPIC: sp_connect_configs
+      OFFSET_STORAGE_TOPIC: sp_connect_offsets
+      STATUS_STORAGE_TOPIC: sp_connect_statuses
+      # Single broker: the internal topics cannot be replicated more than once.
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8083/connectors || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
 
 volumes:
   postgres-data:

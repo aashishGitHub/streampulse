@@ -116,7 +116,7 @@ class SchemaCompatibilityTest {
     class BaselineCompatibility {
 
         @ParameterizedTest(name = "{0} can read data written by its baseline")
-        @ValueSource(strings = {"TelemetryEvent", "MetricAggregate", "AlertEvent", "ConfigChange"})
+        @ValueSource(strings = {"TelemetryEvent", "MetricAggregate", "AlertEvent", "ConfigChange", "WatchEvent"})
         void currentSchemaCanReadBaselineData(String schemaName) throws IOException {
             Schema current = parse(CURRENT_SCHEMA_DIR.resolve(schemaName + ".avsc"));
             Schema baseline = parseResource("baseline/" + schemaName + ".avsc");
@@ -216,7 +216,7 @@ class SchemaCompatibilityTest {
         }
 
         @ParameterizedTest(name = "{0} is a trivially self-compatible schema")
-        @ValueSource(strings = {"TelemetryEvent", "MetricAggregate", "AlertEvent", "ConfigChange"})
+        @ValueSource(strings = {"TelemetryEvent", "MetricAggregate", "AlertEvent", "ConfigChange", "WatchEvent"})
         void schemaIsCompatibleWithItself(String schemaName) throws IOException {
             // A sanity check on the checker: if a schema were not compatible with itself,
             // the test above would be meaningless.

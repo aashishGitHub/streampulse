@@ -167,6 +167,55 @@ channels:
         partitions: 3
         replicas: 1
 
+  activityWatch:
+    address: activity.watch.v1
+    title: A user started watching a title
+    description: |
+      The watch signal behind the "friends are watching" feed. The activity-feed service
+      consumes it and fans the entry out to followers.
+
+      **HONEST GAP: nothing in the real pipeline emits this event.** Telemetry events carry a
+      sessionId, never a user id, so there is no user to attribute a watch to. Today the only
+      producer is `POST /v1/watching` on activity-feed itself.
+
+      **Key: `userId`.** One user's events stay on one partition, in order. A hot user is one
+      partition, which is acceptable: a person starts watching a title a few times an hour.
+
+      **Idempotency:** `eventId` (a UUID) is the key. The consumer is at-least-once and writes
+      each entry so that a redelivery is a no-op; a client retrying with the same `eventId`
+      is deduplicated end to end.
+
+      **6 partitions.** Far lower volume than raw telemetry. Raising it later rehashes keys
+      and breaks per-user ordering, so it is chosen above current need.
+    messages:
+      watchEvent:
+        $ref: '#/components/messages/WatchEvent'
+    bindings:
+      kafka:
+        topic: activity.watch.v1
+        partitions: 6
+        replicas: 1
+
+  activityWatchDlt:
+    address: activity.watch.v1.dlt
+    title: Dead-letter topic for watch events
+    description: |
+      Records the activity-feed consumer could not decode or that carry an invalid value
+      (not a UUID event id, an id outside `[A-Za-z0-9_-]{1,64}`).
+
+      An outage of Redis or Postgres is NOT a reason to dead-letter: the consumer retries
+      those with backoff and never acknowledges past a record it could not apply.
+
+      Original bytes and key are preserved; header `dlt-reason` says why.
+    messages:
+      watchEvent:
+        $ref: '#/components/messages/WatchEvent'
+    bindings:
+      kafka:
+        topic: activity.watch.v1.dlt
+        partitions: 3
+        replicas: 1
+
 operations:
   publishTelemetry:
     action: send
@@ -192,6 +241,14 @@ operations:
     action: send
     channel: { $ref: '#/channels/configChanges' }
     summary: Debezium relays the control-plane outbox
+  publishWatch:
+    action: send
+    channel: { $ref: '#/channels/activityWatch' }
+    summary: activity-feed publishes a watch it accepted over HTTP (no other producer exists yet)
+  consumeWatch:
+    action: receive
+    channel: { $ref: '#/channels/activityWatch' }
+    summary: activity-feed fans each entry out, then commits its offset
 
 components:
   messages:
@@ -223,3 +280,10 @@ components:
         schemaFormat: application/vnd.apache.avro+json;version=1.9.0
         schema:
           $ref: '../../libs/contracts/src/main/avro/ConfigChange.avsc'
+    WatchEvent:
+      name: WatchEvent
+      contentType: application/avro
+      payload:
+        schemaFormat: application/vnd.apache.avro+json;version=1.9.0
+        schema:
+          $ref: '../../libs/contracts/src/main/avro/WatchEvent.avsc'
