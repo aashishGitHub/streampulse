@@ -248,6 +248,13 @@ mcp-test: ## MCP server: format, unit and protocol tests (no Docker)
 	./gradlew :services:mcp-server:spotlessApply :services:mcp-server:test :services:mcp-server:integrationTest
 
 # ---------------------------------------------------------------------------
+# Interview pack (Phase 14): docs/interview must keep matching the repo it describes
+# ---------------------------------------------------------------------------
+.PHONY: interview-check
+interview-check: ## Fail if the interview pack names a missing path or quotes an unsourced number
+	python3 -I scripts/check-interview-pack.py
+
+# ---------------------------------------------------------------------------
 # Diagnostics
 # ---------------------------------------------------------------------------
 .PHONY: doctor

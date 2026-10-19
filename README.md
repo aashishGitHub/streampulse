@@ -58,6 +58,11 @@ keeps a queryable history. Three fictional tenants share it: `streamflix` (gener
             config.changes.v1 ──▶ every service refreshes its caches
 ```
 
+> **The diagram is the target design, not the built system.** What is **not** built: the sink's raw-to-S3
+> writer and the DynamoDB history writer (the Terraform modules and the archive compactor exist, but no
+> service writes to them), and "every service refreshes its caches": only the alert engine consumes
+> `config.changes.v1`. See the phase table below and `MILESTONES.md` for what is verified.
+
 **Full plan:** [`../Java/StreamPulse_Project_Plan.md`](../Java/StreamPulse_Project_Plan.md)
 · **Study material:** [`../Java/interview-qa/`](../Java/interview-qa/)
 
@@ -124,13 +129,13 @@ code**, so "done" is a fact rather than an opinion.
 | **5** | Query API + live SSE (no auth) | ✅ done |
 | 6 | Control plane, Debezium CDC, alert engine | ✅ core complete (no alert-state restore on restart) |
 | 7 | React dashboard | ✅ core complete (tests only; never run against real backends) |
-| 8 | Observability, SLOs, error budgets | ⬜ |
-| 9 | Resilience, load testing, JVM profiling | ⬜ (spec in progress) |
+| 8 | Observability, SLOs, error budgets | ⬜ (rules, dashboards and collector config written; never run or wired; no spec, no runbook) |
+| 9 | Resilience, load testing, JVM profiling | 🚧 in progress: ingest saturation, accounting and latency measured; **crash test fails** (events lost), unfixed |
 | 10 | AWS simulation & Terraform (archive compactor + IaC) | ✅ core complete (`msk`/`vpc`/`eks` validate-only) |
-| 11 | Containers & Kubernetes | ⬜ |
+| 11 | Containers & Kubernetes | ⬜ (a Dockerfile only; no manifests, no chart) |
 | 12 | Activity feed (the Twitter-style design, implemented) | ✅ core complete (mutation checks unverified) |
 | 13 | MCP server / AI tooling | ✅ core complete |
-| 14 | Interview packaging | ⬜ |
+| 14 | Interview packaging | ✅ pack written: [`docs/interview/`](docs/interview/README.md), checked by `make interview-check` (not yet run in a live mock) |
 
 ---
 

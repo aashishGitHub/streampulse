@@ -35,8 +35,11 @@ Each line: failing test first, then code. Tick only with passing output pasted i
       re-sent: every closed window matches on count, sessions and error ratio. Mutation (one
       event under-counted in the script's bookkeeping) went red on that window; restored.
       Happy path only: accounting under a crash is T9-34
-- [ ] T9-13 freshness/latency run repeated at a second rate (not just the one Phase 3 number);
-      p50/p95/p99 for ingest, freshness, query-api read, pasted into `MILESTONES.md`
+- [x] T9-13 latency/freshness at 1,000 and 2,000 events/s (the latter twice), ingest and
+      query-api read p50/p95/p99 plus per-window freshness (flat 5.2 to 5.4 s), in `MILESTONES.md`.
+      Loadgen's own freshness figure is wrong for back-to-back runs (previous run's open window
+      closes late inside it), so freshness comes from Postgres per window. Below the quota; the
+      downstream stages' limits were not reached
 
 ## Control plane / alert engine / activity feed load
 

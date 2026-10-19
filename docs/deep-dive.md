@@ -1,5 +1,8 @@
 # Deep Dive: Real-Time Telemetry Pipeline (StreamPulse)
 
+> Updated 2026-10-19 to match the code and MILESTONES.md after Phases 6-13 and the Phase 9 measurements.
+> The newer, per-phase interview pack is in docs/interview/.
+
 > Three reading depths per topic:
 > - **Beginner** — an analogy, no jargon
 > - **Senior** — mechanics, code shape, trade-off tables
@@ -8,7 +11,7 @@
 > Every topic ends with **In this repo:** — the class and the tests, as repo-relative paths. Every path and test method named here was checked against the source.
 >
 > Rules this file follows:
-> - **(not measured: ...)** marks a figure that was never measured. Never quote one. Figures without the tag come from the run recorded in MILESTONES.md (Phase 3, Day 5).
+> - **(not measured: ...)** marks a figure that was never measured. Never quote one. Figures without the tag come from the runs recorded in MILESTONES.md: Phase 3 Days 2-5 and Phase 9 (T9-11, T9-12, T9-13, T9-34). All measurements are from one laptop, one broker, with the load generator on the same machine.
 > - **assumption** = arithmetic from the interview prompt (10 M viewers × 1 heartbeat / 10 s), not a measurement.
 > - `VERIFY:` = I am not certain of a library default or JDK behaviour. Check the current docs before saying it.
 > - "Question bank" = `/Users/aashishkumar/Downloads/Question bank.md`. IDs like M2, J5, SD3 come from it.
@@ -26,7 +29,7 @@
 6. [J2 — MVC + virtual threads vs WebFlux](#6-j2--mvc--virtual-threads-vs-webflux)
 7. [SD3 — SSE, Last-Event-ID, and coalescing](#7-sd3--sse-last-event-id-and-coalescing)
 8. [M4 — Consumer lag diagnosis](#8-m4--consumer-lag-diagnosis)
-9. [M5 — Dual write and the outbox (not built here)](#9-m5--dual-write-and-the-outbox-not-built-here)
+9. [M5 — Dual write and the outbox](#9-m5--dual-write-and-the-outbox)
 10. [R1 — Timeout, retry, breaker, bulkhead](#10-r1--timeout-retry-breaker-bulkhead)
 11. [R2 — SLIs, SLOs, and burn rate](#11-r2--slis-slos-and-burn-rate)
 12. [R4 — Graceful shutdown and zero-loss deploys](#12-r4--graceful-shutdown-and-zero-loss-deploys)
@@ -82,7 +85,7 @@ You post a parcel and the tracking site says "not sure it arrived". You post a s
 | Gateway → Kafka | Producer retry duplicates or reorders | `enable.idempotence=true`, `acks=all` | ingest `application.yml` |
 | Gateway: claim then publish fails | Ids stay claimed; retry looks like a duplicate; **silent loss** | Compensating `release()` | `IngestService` |
 | Redis down | Cannot dedup | **Fail open**: publish, count, return `degraded: true` | ADR-0007 |
-| Kafka → Kafka (processor) | Crash mid-processing | `exactly_once_v2`: output + changelog + offsets in one transaction | stream-processor `application.yml` |
+| Kafka → Kafka (processor) | Crash mid-processing | `exactly_once_v2`: output + changelog + offsets in one transaction. After `kill -9` it held (no duplicates) but on-time events were dropped as expired-window records (see the gaps below; MILESTONES.md, Phase 9 · T9-34) | stream-processor `application.yml` |
 | Kafka → Postgres | At-least-once redelivery | Idempotent upsert, guarded by `computed_at` | `JdbcMetricWindowStore` |
 | Offsets | Commit before write → loss | Manual ack **after** the durable write | `AggregateBatchListener` |
 
@@ -105,7 +108,7 @@ The ack rule: the listener decodes, submits every record to the batch writer, **
 
 ### Architect — What exactly-once v2 does not cover, and what the tests do not prove
 
-**Scope of `exactly_once_v2`.** It makes read → process → write-to-Kafka atomic: the output records, the state-store changelog and the consumer offsets commit in one transaction. It does **not** cover anything that leaves Kafka. Postgres and Redis are not Kafka resources. The honest claim is at-least-once delivery plus idempotent writes (ADR-0012, ADR-0013).
+**Scope of `exactly_once_v2`.** It makes read → process → write-to-Kafka atomic: the output records, the state-store changelog and the consumer offsets commit in one transaction. It does **not** cover anything that leaves Kafka. Postgres and Redis are not Kafka resources. Nor did it make the windowed aggregates correct after a restart with a backlog, even inside Kafka: in T9-34 no record was duplicated, yet on-time events were dropped (see the gaps below). The honest claim is at-least-once delivery plus idempotent writes (ADR-0012, ADR-0013).
 
 `read_committed` on the sink consumer matters: it skips records from aborted producer transactions. The comment on the consumer config says so (`services/sink-writer/src/main/resources/application.yml`).
 
@@ -119,6 +122,7 @@ The ack rule: the listener decodes, submits every record to the batch writer, **
 - Single broker, replication factor 1. `KafkaIngestIT.producerDeliveryGuarantees` asserts the **configuration** (`enable.idempotence`, `acks=all`), not behaviour when a replica is lost (`MILESTONES.md`, Phase 3 Day 1 "Honest gaps").
 - Redis claim at ingest is not exactly-once either: a timeout may fire after the write landed, the claim is released, the retry publishes again. A duplicate, accepted by design; the processor dedups within window + grace.
 - Nothing rebuilds the Redis projection yet.
+- **Processor crash loses on-time events (measured, T9-34; MILESTONES.md "Phase 9 · T9-34", one laptop, one broker, one instance, `kill -9` of the processor).** No duplicates, but events were **dropped** as `Skipping record for expired window`: 1,482 of 4,000 and 2,554 of 8,000, each equal to the processor's own WARN count. The mechanism is **likely** multi-partition backlog catch-up advancing stream time past the 5 s grace; **not proven**. **Not fixed.** It is **invisible to `streampulse_processor_*` metrics** (only the Kafka Streams dropped-records counter and the WARN log show it). Fix options (a larger grace, emitting revisions, draining the backlog first) each change a documented guarantee and need an ADR. Not tried: graceful SIGTERM, a short outage, a second instance taking over.
 - **Differs from the Question bank:** the bank says "upsert by eventId, or a dedupe store with TTL". Here the sink upserts by **aggregate identity** (not by event id), and event-id dedup lives in two places: Redis at ingest (24 h TTL) and a window store in the processor.
 
 **In this repo:**
@@ -172,7 +176,7 @@ Rules:
 **In this repo:**
 - `services/ingest-gateway/src/main/java/com/streampulse/ingest/domain/IngestCommand.java` (`partitionKey()`), `.../adapter/out/kafka/KafkaEventPublisher.java`
 - `services/stream-processor/src/main/java/com/streampulse/processor/adapter/streams/TelemetryTopology.java`, `.../EventIdDeduplicator.java`, `.../domain/AggregateKey.java`
-- `docker/compose.yml` — topic creation (12 / 6 / 3 / 3 partitions)
+- `docker/compose.yml` — topic creation in `kafka-init` (five topics: 12 / 6 / 3 / 3 partitions, plus `config.changes.v1`: 3 partitions, compacted)
 - Tests: `services/ingest-gateway/src/test/java/com/streampulse/ingest/adapter/KafkaIngestIT.java` — `sameSessionSamePartition`, `batchReachesKafkaWithTheRightKey`; `services/ingest-gateway/src/test/java/com/streampulse/ingest/application/IngestServiceTest.java` (nested `HappyPath`) — `partitionKeyIsSessionId`; `services/stream-processor/src/test/java/com/streampulse/processor/adapter/streams/TelemetryTopologyTest.java` — `recordKeyIdentifiesTheWindowAndMetric`, `regionsAreSeparate`, `duplicateEventIdCountedOnce`; `services/stream-processor/src/test/java/com/streampulse/processor/domain/AggregateKeyTest.java` — `deterministic`, `missingTitle`, `tenantNormalised`
 
 ---
@@ -198,7 +202,7 @@ Imagine counting people who passed a turnstile between 12:00:00 and 12:00:10 **b
 
 **The cost, said as a trade.** A final aggregate cannot appear sooner than window + grace = **15 s after the window starts** (ADR-0012). That is what correctness for late events costs. Against a 30 s freshness target (an assumption you should confirm) that leaves about 15 s for the rest of the pipeline. If the target were 5 s: emit provisional values (`isFinal=false`) and let the sink's `computed_at` upsert replace them. The upsert is already built for that.
 
-**What the freshness metric measures.** `streampulse.sink.freshness` = `now − windowEnd` at the durable write. It starts at window **end**, not at event time. True event-to-visible freshness is that number plus up to 10 s of window. p99 5.71 s from the histogram estimate; all 9 closed windows landed 5.2 to 5.4 s after their end in Postgres, and grace is 5 s
+**What the freshness metric measures.** `streampulse.sink.freshness` = `now − windowEnd` at the durable write. It starts at window **end**, not at event time. True event-to-visible freshness is that number plus up to 10 s of window. p99 5.71 s from the histogram estimate (Phase 3); all 9 closed windows landed 5.2 to 5.4 s after their end in Postgres, and grace is 5 s. Phase 9 · T9-13 (one laptop, one broker, 1,000 and 2,000 events/s, 5 to 6 windows per run) measured per-window freshness 5.2 to 5.4 s again. The loadgen's own freshness p99 is unreliable for back-to-back runs (it reported 39.33 / 112.93 / 39.63 s because the previous run's open window closes late inside it): quote Postgres per window, not the loadgen histogram.
 
 **The stall.** `suppress` emits only when stream time advances. A **quiet partition holds its last window open indefinitely**. At the prompt's 1 M events/s this does not happen; on an idle title or an under-keyed topic it will. `TelemetryTopologyTest.noOutputBeforeWindowCloses` proves nothing is emitted early, and most other tests pipe a "tick" record (`tickPastWindowOne`) to close the window. `StreamProcessorIT` uses **one partition per topic** so stream time is deterministic. Mitigations (design options, not built): steady traffic, a synthetic heartbeat per partition, or monitoring the age of the oldest open window. **VERIFY** any idle-partition behaviour of your Kafka Streams version before promising it.
 
@@ -278,7 +282,7 @@ Why a randomised concurrency test lies:
 - To test a race, **control the interleaving**: inject a collaborator you own (here the queue) and stall it at the exact point. That is why `start(...)` has a package-private overload taking a queue.
 - Then mutation-test it: remove the lock and confirm **that** test fails.
 
-**Discrepancy to be aware of (VERIFY):** `specs/04-sink-writer/tasks.md` line T4-03 still says the randomised test "goes red" when the lock is removed. That contradicts the finding above and `design.md`. I did not re-run the mutation (no Gradle in this task). Treat `tasks.md` T4-03 as stale until re-checked.
+`specs/04-sink-writer/tasks.md` T4-03 records the same result: with the lock removed the randomised test stayed green and only the deterministic test went red.
 
 **Measured behaviour:** (not measured: batch flush latency p99 and peak queue depth under the load run)
 
@@ -333,7 +337,7 @@ Consequences you should be able to state:
 - `services/query-api/src/main/java/com/streampulse/query/application/TitleOverviewService.java`, `.../application/BoundedExecutor.java`, `services/query-api/src/main/java/com/streampulse/query/config/QueryConfig.java`, `services/query-api/src/main/resources/application.yml`
 - Tests in `services/query-api/src/test/java/com/streampulse/query/application/TitleOverviewServiceTest.java`: `slowCallIsDegradedAndTheBudgetHolds`, `callsRunInParallel`, `allCallsFailingStillAnswers`, `workNeverRunsOnTheCommonPool`, `saturatedExecutorDegradesInsteadOfBlocking`
 - `services/query-api/src/test/java/com/streampulse/query/adapter/in/web/QueryControllersTest.java` — `overviewAnswers`
-- Spec says the mutation "remove `orTimeout`, `slowCallIsDegradedAndTheBudgetHolds` goes red" was done (`specs/05-query-api/tasks.md` T5-04). There is no console output for it in `MILESTONES.md` (no Phase 5 entry yet).
+- Spec says the mutation "remove `orTimeout`, `slowCallIsDegradedAndTheBudgetHolds` goes red" was done (`specs/05-query-api/tasks.md` T5-04). `MILESTONES.md` (Phase 3 Days 3-4) records the mutation as an agent report, so treat it as agent-reported.
 - ADR: `docs/adr/0014-webflux-sse-redis-streams.md` (The J6 shape)
 
 ---
@@ -472,7 +476,7 @@ kafka-consumer-groups.sh --bootstrap-server <broker> --describe --group sink-wri
 
 ---
 
-## 9. M5 — Dual write and the outbox (not built here)
+## 9. M5 — Dual write and the outbox
 
 ### Beginner — Telling two people the same news
 
@@ -482,18 +486,26 @@ You tell your bank you moved house, then phone the post office. If the phone cal
 
 **Dual-write problem:** you change a database and publish an event; one succeeds and the other fails. **Outbox:** write the event to an outbox table **in the same transaction** as the state change; a relay (a poller, or CDC such as Debezium) publishes from the table; consumers are idempotent because the relay is at-least-once.
 
-### Architect — What this repo does instead, and where the real outbox is
+### Architect — What the control plane does, and what is still open
 
-**Not implemented in StreamPulse.** Say so plainly. The outbox was built in the Go ticket-booking project; point at it:
+The control plane (`services/control-plane`) has a real outbox. The flow of control:
 
-- `/Users/aashishkumar/Documents/GitHub/GolangExercise/ticket-booking/internal/outbox/relay.go`
-- `/Users/aashishkumar/Documents/GitHub/GolangExercise/ticket-booking/cmd/outbox-relay/main.go`
-- `/Users/aashishkumar/Documents/GitHub/GolangExercise/ticket-booking/migrations/000005_domain_events.up.sql`
-- `/Users/aashishkumar/Documents/GitHub/GolangExercise/ticket-booking/internal/reconcile/reconcile.go`
+1. A REST write changes the business row (tenant, alert rule and so on) and inserts an outbox row **in the same Postgres transaction**. The outbox port is `Propagation.MANDATORY`: called outside a transaction it throws instead of committing on its own connection (ADR-0015).
+2. Debezium reads the outbox table from the Postgres WAL; its `EventRouter` SMT routes every row to the compacted topic `config.changes.v1`, keyed by `aggregate_id` so one entity stays in one partition, in order. The payload is raw Avro bytes (ADR-0016).
+3. A delete writes an outbox row with an empty payload, which the router turns into a **tombstone** (null value) so compaction can drop the key.
+4. Delivery is **at-least-once** (the relay can replay after a restart), so consumers must dedupe on the change id and the entity version.
 
-(I confirmed these files exist and mention the outbox. **VERIFY** their details before describing the relay's mechanics; I did not read them.)
+Proven live: create, update and delete of one tenant gave three records on `config.changes.v1` (two Avro records, then a null-value tombstone) (`MILESTONES.md`, "Phase 6 — Control plane, Debezium CDC, alert engine"; one local stack, one run). `OutboxAtomicityIT` includes the mutation check where the outbox runs on its own connection.
 
-**Dual writes that *do* exist here, and how each is handled:**
+**Gaps, stated plainly (ADR-0015, ADR-0016):**
+
+- No outbox retention job: rows stay after being relayed, so the table grows.
+- Nothing alerts on replication-slot lag. A stopped connector leaves the slot inactive with WAL retained, and an abandoned slot would fill the disk.
+- Service nodes have no entity type in the `ConfigChange` contract and are announced as `ENTITY_UNKNOWN` (ADR-0015). VERIFY: whether "apps" are announced at all; I did not find a statement either way.
+- `OutboxCdcIT` (Testcontainers plus Debezium) was not rerun in the Phase 6 close-out; the live proof is the compose stack.
+- No authentication on the control-plane API; single Postgres instance.
+
+The other dual writes in this repo are handled without an outbox, because each has a different property that makes one unnecessary:
 
 | Two-system write | Handling | Why an outbox is not needed |
 |---|---|---|
@@ -501,9 +513,12 @@ You tell your bank you moved house, then phone the post office. If the phone cal
 | Postgres write then Redis write (`AggregateSink`) | Postgres first; Redis is a **rebuildable projection**; failure counted and swallowed | Redis can be recomputed from Postgres |
 | Postgres write then Kafka offset commit (`AggregateBatchListener`) | Commit only after the write; idempotent upsert absorbs redelivery | The write is idempotent, so at-least-once is safe |
 
-**Differs from the Question bank:** the bank's M5 is "DB update + publish event → outbox". Here the pattern is **different on purpose**: the sink consumes events and the writes are idempotent. Your anchor is the Couchbase CDC → SSE path and the Go outbox, not this repo. ADR-0013 lists "an outbox or two-phase commit would add machinery this write does not need".
+**Differs from the Question bank:** the bank's M5 is "DB update + publish event → outbox". The control plane follows it. The telemetry path does not, on purpose: the sink consumes events and its writes are idempotent. ADR-0013 lists "an outbox or two-phase commit would add machinery this write does not need". The alert engine also has an in-memory per-channel delivery outbox (a different thing from the control-plane outbox).
 
 **In this repo:**
+- Outbox: `services/control-plane/src/main/java/com/streampulse/controlplane/adapter/out/outbox/JdbcConfigChangeOutbox.java`, `docker/debezium/outbox-connector.json`
+- Outbox test: `services/control-plane/src/test/java/com/streampulse/controlplane/OutboxAtomicityIT.java`
+- ADRs: `docs/adr/0015-jpa-flyway-transactional-outbox.md`, `docs/adr/0016-debezium-outbox-router-raw-avro.md`
 - `services/ingest-gateway/src/main/java/com/streampulse/ingest/application/IngestService.java` (compensating `release`), `services/sink-writer/src/main/java/com/streampulse/sink/application/AggregateSink.java` (Postgres first, Redis swallowed)
 - Tests: `services/ingest-gateway/src/test/java/com/streampulse/ingest/application/IngestServiceTest.java` (nested `PublishFailures`) — `aFailedPublishCanBeRetried`, `withoutTheReleaseTheRetryIsSwallowed`; `services/sink-writer/src/test/java/com/streampulse/sink/application/AggregateSinkTest.java` — `storesThenRecordsFreshnessThenProjects`, `storeFailureStopsEverythingElse`, `projectionFailureDoesNotFailTheBatch`
 
@@ -566,12 +581,12 @@ You do not judge a restaurant by how hot the oven is. You judge it by how long g
 
 | SLI | Metric / source | Built? |
 |---|---|---|
-| Ingest success rate | `http_server_requests_seconds_count{uri="/v1/events:batch",status=~"5.."}` ratio | dashboard panel: "Ingest 5xx ratio and p99 latency" |
+| Ingest success rate | `http_server_requests_seconds_count{uri="/v1/events:batch",status=~"5.."}` ratio | dashboard panel: "Ingest 5xx ratio and p99 latency"; recording rule written in `docker/observability/rules/streampulse-sli.rules.yml` (never run or verified) |
 | p99 ingest latency | `http_server_requests_seconds_bucket` (needs `percentiles-histogram: http.server.requests: true`, set in ingest `application.yml`) | dashboard panel |
 | End-to-end freshness | `streampulse.sink.freshness` (Timer with histogram, seconds, window end → durable write) | dashboard panel "Freshness p99" |
 | Consumer lag | `kafka_consumer_fetch_manager_records_lag_max` | dashboard panel |
 | DLQ rate | `streampulse.processor.events.rejected` (tag `reason`), `streampulse.sink.dead.letters` | dashboard panel |
-| Data completeness (received vs expected heartbeats) | — | **not built** |
+| Data completeness (received vs expected heartbeats) | — | **not built**; still not an SLI. `scripts/accounting-check.py` (sent vs stored per closed window) is an offline check, not a metric |
 
 Other counters worth naming: `streampulse.ingest.events.published`, `.duplicates`, `.rejected` (capacity), `.throttled` (quota), `streampulse.ingest.idempotency.unavailable` (fail-open count), `streampulse.ingest.publish.failures`, `streampulse.processor.events.duplicates`, `streampulse.sink.batch.flush`, `streampulse.sink.projection.failures`.
 
@@ -579,7 +594,7 @@ RED (rate, errors, duration) for services; USE (utilisation, saturation, errors)
 
 ### Architect — SLO, burn rate, and the probe design
 
-**Proposal, not built:** "99.9% of events visible within 60 s". Keep an error budget, alert on **burn rate** (multi-window), not static thresholds. **I have no alert rules and no burn-rate calculation in this repo** (a search for "alert" and "burn rate" finds only prose in docs). Metrics and one Grafana dashboard exist.
+**Written, never run:** the repo has recording rules (`docker/observability/rules/streampulse-sli.rules.yml`), alert rules (`streampulse-alerts.rules.yml`) and a rules test file under `docker/observability/rules/tests`. The alerts are multiwindow multi-burn-rate (14.4x / 6x / 1x) on an ingest availability target of 99.9% and a freshness target of 99% durable within 30 s of window end (both targets, not measurements), plus cause alerts. There are four Grafana dashboards (`streampulse`, `streampulse-red`, `streampulse-jvm`, `streampulse-slo`) and an OTel config. **None of it was ever run or wired:** `make up-obs` does not load the rules or the new dashboards, `promtool` was never run against them, and `docs/runbook.md` and `docs/system-health.md` do not exist. Say "written, unverified", not "built".
 
 **Why freshness beats lag.** Lag counts records; freshness counts what the user feels. A pipeline can have zero lag and a stalled window (see the quiet-partition stall in section 3); only freshness shows it.
 
@@ -614,7 +629,7 @@ phase 100         IngestDrainLifecycle: readiness → REFUSING_TRAFFIC, wait for
 ```
 
 - `IngestDrainLifecycle.stop()` publishes `ReadinessState.REFUSING_TRAFFIC` (readiness → 503, the pod leaves the Service) then polls the in-flight semaphore until all permits return, up to `drain-timeout` (20 s). A timeout logs an error: those clients get no 202 and must retry; idempotency makes that safe.
-- `server.shutdown: graceful` and `spring.lifecycle.timeout-per-shutdown-phase: 25s`. The sum of the phases must fit inside Kubernetes `terminationGracePeriodSeconds` (the comment says Phase 11 sets 45 s; **no Kubernetes manifests exist yet**).
+- `server.shutdown: graceful` and `spring.lifecycle.timeout-per-shutdown-phase: 25s`. The sum of the phases must fit inside Kubernetes `terminationGracePeriodSeconds` (the comment says Phase 11 sets 45 s; **no Kubernetes manifests exist; Phase 11 has only a Dockerfile**).
 
 The sink:
 
@@ -629,12 +644,12 @@ Rules to state:
 2. **Readiness off before shutdown** so the load balancer stops sending.
 3. **Liveness must not depend on the broker** or you restart the fleet during a broker blip.
 4. **Cooperative rebalancing** (`CooperativeStickyAssignor`) avoids stop-the-world rebalances in the sink.
-5. PodDisruptionBudget, a canary pod watched on lag and error rate, autoscaling on lag: design answers from the Question bank (R4, D4). **Not built here** (Kubernetes is Phase 11).
+5. PodDisruptionBudget, a canary pod watched on lag and error rate, autoscaling on lag: design answers from the Question bank (R4, D4). **Not built here.** Phase 11 has only `deploy/docker/Dockerfile`; there are no Kubernetes manifests.
 
 **What is not proven (say it):**
 - **No test sends a real SIGTERM.** `HealthProbesIT` calls the lifecycle `stop()` directly; it proves the readiness flip and the liveness non-flip, not the full `SmartLifecycle` ordering under a real signal (`MILESTONES.md`). `RollingRestartChaosIT` (BS-01's acceptance test) is a Phase 11 item.
 - The drain was verified by mutation: commenting out the single `AvailabilityChangeEvent.publish(...)` line makes `readinessGoesOutOfServiceOnDrainButLivenessStaysUp` fail (**3 of 4 probe tests still passed**).
-- Processor crash mid-window recovery is asserted by design (state restored from the changelog; `exactly_once_v2`), not demonstrated: `StreamProcessorIT` "does not prove recovery".
+- Processor crash mid-window recovery **was demonstrated, and it fails** (MILESTONES.md "Phase 9 · T9-34": `kill -9` of the processor, no duplicates, but 1,482 of 4,000 and 2,554 of 8,000 on-time events dropped as expired-window records; likely cause multi-partition backlog catch-up passing the 5 s grace, not proven; unfixed). The recovery requirement (REQ-RS-05) stays unticked. `StreamProcessorIT` still does not kill anything; the crash test is a script, not a JUnit test.
 
 **In this repo:**
 - `services/ingest-gateway/src/main/java/com/streampulse/ingest/lifecycle/IngestDrainLifecycle.java`, `.../lifecycle/GrpcServerLifecycle.java`, `services/sink-writer/src/main/java/com/streampulse/sink/lifecycle/BatchWriterLifecycle.java`, ingest `application.yml` (`drain-timeout`, `shutdown-timeout`, `timeout-per-shutdown-phase`)
@@ -684,7 +699,7 @@ A rehearsal in your living room (fast, no audience) shows whether the lines are 
 | `TopologyTestDriver` | in memory, no broker | every window/grace/dedup/DLT behaviour of the topology (`TelemetryTopologyTest`) | transactions, real timestamps, wiring |
 | Spring wiring tests | context only, no Docker (`SinkWiringTest`, `StreamProcessorWiringTest`, `QueryApiWiringTest`) | the context assembles; settings are what the design needs; probe groups | behaviour under traffic |
 | ArchUnit | classpath bytecode (`*ArchitectureRulesTest`) | layering: domain/batch/application are framework-free | runtime behaviour |
-| `*IT` with Testcontainers | `./gradlew integrationTest` (`make it`), needs Docker | real Kafka / Postgres / Redis behaviour (`NoLossNoDoubleCountIT`, `StreamProcessorIT`, `KafkaIngestIT`, `SseResumeIT`, `MetricWindowUpsertIT`) | a real crash or a broker failing mid-write |
+| `*IT` with Testcontainers | `./gradlew integrationTest` (`make it`), needs Docker | real Kafka / Postgres / Redis behaviour (`NoLossNoDoubleCountIT`, `StreamProcessorIT`, `KafkaIngestIT`, `SseResumeIT`, `MetricWindowUpsertIT`) | a real crash or a broker failing mid-write (the ITs do not kill anything; the live-stack crash test is `scripts/accounting-check.py --at "12:pkill -9 ..."`, a script, not an IT) |
 | Mutation check | break the code on purpose | that a test **can fail** | — |
 
 Mechanics worth knowing:
@@ -692,7 +707,7 @@ Mechanics worth knowing:
 - **`TopologyTestDriver`**: the topology is a pure function (`TelemetryTopology.build`) with an injected `Clock`. The test sets `STATESTORE_CACHE_MAX_BYTES_CONFIG = 0` because a record cache would hold a window's updates until the next commit and the test would assert on timing the topology does not promise. Stream time advances only on later records, so tests pipe a "tick" (`tickPastWindowOne`).
 - **`StreamProcessorIT`**: real broker, `exactly_once_v2` as in `application.yml`; one partition per topic so there is one task and stream time is deterministic; the verifying consumer uses `read_committed`, as a downstream consumer of a transactional topic must.
 - **Gradle:** `*IT` classes run only under `integrationTest`; `./gradlew test` is Docker-free; `check` runs both. Gradle 9 fails a `Test` task that discovers no tests, so `integrationTest` sets `failOnNoDiscoveredTests = false` (`libs:*` have no `*IT` classes). `jacocoTestReport` uses `mustRunAfter(integrationTest)`: an ordering, not a dependency, so the report does not force the slow task.
-- **Testcontainers lessons** (`MILESTONES.md`, `RESUME-HERE.md`): a dead-but-present Docker socket produces *silence*, not an error; `apache/kafka:3.9.0` fails under Testcontainers 1.21.2 with an advertised-listener error while **3.9.1** starts (root cause not established); the resolved Testcontainers is 1.21.2 although the version catalog says 1.21.3 (the Boot BOM wins, an unresolved follow-up).
+- **Testcontainers lessons** (`MILESTONES.md`, `RESUME-HERE.md`): a dead-but-present Docker socket produces *silence*, not an error; `apache/kafka:3.9.0` fails under Testcontainers 1.21.2 with an advertised-listener error while **3.9.1** starts (root cause not established); the resolved Testcontainers is 1.21.2 although the version catalog says 1.21.3 (the Boot BOM wins, an unresolved follow-up; **VERIFY:** the catalog still says 1.21.3 and I did not re-resolve it).
 - **Fixed ports are shared globals.** Two `@SpringBootTest` contexts in one JVM collided on gRPC port 9090 (fixed by `port=0`); it never reproduces when either class runs alone.
 
 ### Architect — Mutation, false confidence, and what "green" does not mean
@@ -708,7 +723,7 @@ Recorded mutation results (all in the repo's own docs):
 | readiness drain | comment out `AvailabilityChangeEvent.publish` | the drain test red; 3 of 4 still green | `MILESTONES.md` |
 | liveness group | add Redis to it | restart storm: liveness 503 | `MILESTONES.md` |
 | protocol parity | `.trim().toUpperCase()` in the gRPC mapper | parity test red, names the field | `MILESTONES.md` |
-| BatchWriter lock | remove `ReentrantReadWriteLock` | randomised test **stayed green**; deterministic test red | this document, section 4; `specs/04-sink-writer/design.md` (VERIFY: `tasks.md` T4-03 says otherwise) |
+| BatchWriter lock | remove `ReentrantReadWriteLock` | randomised test **stayed green**; deterministic test red | this document, section 4; `specs/04-sink-writer/design.md` |
 | `orTimeout` | remove it | `slowCallIsDegradedAndTheBudgetHolds` red | `specs/05-query-api/tasks.md` T5-04 (no console output in MILESTONES) |
 
 Three lessons to say:
@@ -717,7 +732,7 @@ Three lessons to say:
 2. **Randomised concurrency tests give false confidence** when the dangerous window is tiny. Force the interleaving by owning a collaborator.
 3. **Running the app is a different test from testing the app.** `bootRun` lacked a system property that the tests had; the whole suite was green while the first real request returned a 500 (`MILESTONES.md`).
 
-**Also, a self-correction to know about:** test totals in older MILESTONES entries were inflated by 25 because stale `kata/build/test-results` were still being summed after the module was removed; corrected there. And `MILESTONES.md` has **no entries for Phase 3 Day 2 onward** (the processor, sink and query tests exist and pass per your build, but their console output is not recorded there); `specs/04-sink-writer/tasks.md` T4-12 ("verified output into MILESTONES.md") is unticked.
+**Also, a self-correction to know about:** test totals in older MILESTONES entries were inflated by 25 because stale `kata/build/test-results` were still being summed after the module was removed; corrected there. `MILESTONES.md` now has "Phase 3 · Days 2-5" (processor, sink, query API, load run) and `specs/04-sink-writer/tasks.md` T4-12 is ticked.
 
 **In this repo:**
 - `services/stream-processor/src/test/java/com/streampulse/processor/adapter/streams/TelemetryTopologyTest.java`, `services/stream-processor/src/test/java/com/streampulse/processor/StreamProcessorIT.java`, `services/sink-writer/src/test/java/com/streampulse/sink/adapter/in/kafka/NoLossNoDoubleCountIT.java`, `services/sink-writer/src/test/java/com/streampulse/sink/application/batch/BatchWriterTest.java`
@@ -745,7 +760,7 @@ When you hear these phrases, these mechanisms should appear in your answer.
 | "timeout, retry, breaker, bulkhead" | Order matters: Retry( CircuitBreaker( TimeLimiter ) ); retry only fast failures; jitter; verified by mutation |
 | "define system health" | User-facing SLIs, SLO, error budget, burn rate; liveness vs readiness |
 | "zero-loss deploy" | Stop polling → finish in-flight → commit → exit; readiness off first; liveness not dependent on the broker |
-| "DB update plus publish an event" | Dual-write problem; outbox + relay/CDC; idempotent consumers; honest: not built here, built in Go ticket-booking |
+| "DB update plus publish an event" | Dual-write problem; outbox + relay/CDC; idempotent consumers; built in the control plane (transactional outbox + Debezium; ADR-0015/0016); the telemetry path does not need one |
 | "a dependency is slow on a peak night" | Degraded modes decided in advance; "telemetry must never break playback" |
 
 ## Anti-patterns
@@ -770,7 +785,7 @@ What **not** to say or do, and what to say instead.
 | Retry without jitter | Synchronised retry wave lands on a dependency that has not recovered | Exponential backoff with random jitter |
 | Returning 500 for a transient broker failure | Client concludes the batch is malformed and drops it | 503 + `Retry-After` |
 | Claiming a number you did not measure | A wrong number delivered confidently is worse than none | Say "assumption", or "I did not measure that" |
-| Claiming a feature that is not built | Exposed by the first follow-up | Say: no auth on the query API; no alert rules; no hot-key salting; no lag autoscaling; no outbox here |
+| Claiming a feature that is not built | Exposed by the first follow-up | Say: no auth on the query API; alert rules written but never wired or verified; no hot-key salting; no lag autoscaling |
 | Salting a key and summing distinct counts with a random salt | The same viewer is counted in two salts | Salt by hash of `sessionId`, or merge HyperLogLog sketches |
 | Writing the cache/projection first | A reader sees a value the durable store never held | Durable store first; projection is derived and rebuildable |
 | Dead-lettering because the store was down | Turns an outage into data loss | Retry forever on outage; dead-letter only deterministic poison |
@@ -783,19 +798,19 @@ Say these as deliberate honest notes, not as apologies.
 
 | Question bank (idealised) | This repo (what the code does) | Where |
 |---|---|---|
-| Kinesis/Kafka + Flink; hot store Redis/OpenSearch; raw → Firehose → S3 Parquet | Kafka + Kafka Streams; Postgres + Redis; **no raw archive, no OpenSearch** | ADR-0012 |
-| 429 for backpressure | **429 = tenant quota only; 503 = gateway saturated or broker unavailable.** The OpenAPI file still describes saturation as 429 | `IngestExceptionHandler.java`, `api/openapi/ingest-v1.yaml` |
+| Kinesis/Kafka + Flink; hot store Redis/OpenSearch; raw → Firehose → S3 Parquet | Kafka + Kafka Streams; Postgres + Redis; **no OpenSearch; no raw archive in use** (an S3 bucket via Terraform against moto and an archive compactor exist, but no service writes raw events to it and the compactor runs only in tests) | ADR-0012 |
+| 429 for backpressure | **429 = tenant quota only; 503 = gateway saturated or breaker open / stream unavailable.** `api/openapi/ingest-v1.yaml` now documents both | `IngestExceptionHandler.java`, `api/openapi/ingest-v1.yaml` |
 | Client-side gzip | **Not implemented or tested** on the server | grep of `services/ingest-gateway/src` finds no gzip handling (VERIFY) |
 | WebFlux for SSE fan-out; MVC + virtual threads for ingest | Same split; **WebFlux only in query-api** | ADR-0006, ADR-0014 |
 | Redis as the hot store | **Redis is a rebuildable projection; Postgres is the durable source of truth** | ADR-0013 |
 | Approximate distinct count | **Exact set of session ids**, not HyperLogLog | `WindowAccumulator.java` |
 | Salt the key for hot partitions | **Not salted**; `tenant:title:region` is one key | `AggregateKey.java` |
 | Autoscale on lag (KEDA) | **Not built** | `specs/` Phase 11 |
-| SLO burn-rate alerts | **No alert rules in the repo**; metrics and a dashboard only | `docker/observability/` |
+| SLO burn-rate alerts | **Rules written, not wired and not verified** (`make up-obs` does not load them; `promtool` never run) | `docker/observability/rules/` |
 | Multi-broker, replicated Kafka | **Single broker, replication factor 1** | `docker/compose.yml` |
 | Schema registry | **Raw Avro, no registry**; compatibility gated by `SchemaCompatibilityTest` | ADR-0012 |
-| Authenticated dashboards | **Ingest: JWT + Keycloak OIDC. Query API: none** | `specs/05-query-api/requirements.md` |
-| Outbox for DB + event | **Not implemented here**; built in the Go ticket-booking project | section 9 |
+| Authenticated dashboards | **Ingest: JWT + Keycloak OIDC. Query API, control-plane, alert-engine, activity-feed: no auth.** The dashboard has an OIDC/PKCE flow, off by default and never exercised live | `specs/05-query-api/requirements.md` |
+| Outbox for DB + event | **Implemented in the control plane** (outbox row in the same transaction, Debezium EventRouter to `config.changes.v1`); not used on the telemetry path | section 9 |
 | J5 sketch: `volatile open`, "fix with poison pill or a lock" | **Read-write lock**, per-record futures, retry + isolate + dead-letter | section 4 |
 | Idempotent sink "upsert by eventId" | **Upsert by aggregate identity** guarded by `computed_at` | `JdbcMetricWindowStore.java` |
 
@@ -805,17 +820,17 @@ Say these as deliberate honest notes, not as apologies.
 
 Taken from `MILESTONES.md`, the specs and what I found reading the code.
 
-- **Every number is a target unless MILESTONES.md records a measurement for it.** Only throughput, ingest latency and freshness were measured. Window 10 s, grace 5 s, batch 200 / 100 ms / 2000 / 1 s, overview 300 ms, coalesce 250 ms, heartbeat 15 s, breaker thresholds: all explainable, none measured.
+- **Every number is a target unless MILESTONES.md records a measurement for it.** Measured (one M2 Pro laptop, one broker, loadgen on the same machine, one or two runs each): throughput, ingest latency and freshness (Phase 3); ingest saturation (T9-11); 5xx and 429 at saturation; overview read p99 at about 52 req/s and per-window freshness at 1,000 and 2,000 events/s (T9-13); end-to-end accounting (T9-12); and the processor crash result (T9-34). Window 10 s, grace 5 s, batch 200 / 100 ms / 2000 / 1 s, overview 300 ms, coalesce 250 ms, heartbeat 15 s, breaker thresholds: all explainable, none measured.
 - **Single broker.** `acks=all` is asserted as configuration, not behaviour under replica loss.
-- **No test kills the JVM.** `NoLossNoDoubleCountIT` throws an exception; `StreamProcessorIT` does not kill the processor mid-window; no test sends a real SIGTERM.
+- **No JUnit test kills the JVM.** `NoLossNoDoubleCountIT` throws an exception and `StreamProcessorIT` does not kill the processor. The processor **was** killed with `kill -9` by a script (T9-34) and that **failed**: on-time events were dropped. Still true: no test sends a real SIGTERM, and the sink was never killed.
 - **Ingest idempotency is demo-scale.** One sequential `SET NX EX` round trip per event id (up to 500 per batch; `RedisIdempotencyStore.claimAll` loops), with a 24 h TTL. At the prompt's assumed 1 M events/s that is on the order of 86 billion keys (assumption arithmetic). The processor already dedups within window + grace.
 - **Hot key not salted; distinct count is exact.**
 - **Redis projection has no rebuild job** and no retry policy of its own (2 s command timeout, then counted and swallowed).
 - **Live feed can repeat a record after a redelivery;** the `latest` hash can briefly be older after a cross-partition redelivery.
-- **Query API: no authentication or authorization;** overview title metadata is a stub standing in for a control plane that does not exist; replay is bounded by stream trimming; the Redis-down retry loop has no automated test.
-- **No alert rules, no burn-rate, no lag autoscaling, no Kubernetes manifests.**
-- **`specs/04-sink-writer/tasks.md` T4-03 contradicts** the randomised-test finding (VERIFY).
-- **`MILESTONES.md` has no entries for Phase 3 Day 2 onward;** `specs/04-sink-writer/tasks.md` T4-12 is unticked. `RESUME-HERE.md` still describes the state as of Phase 3 Day 1.
+- **Query API: no authentication or authorization;** overview title metadata still comes from `StubTitleCatalog`; the control plane now exists (it has a `TitleEntity`) but query-api does not read from it; replay is bounded by stream trimming; the Redis-down retry loop has no automated test.
+- **Alert and burn-rate rules are written but never wired or verified; no lag autoscaling; no Kubernetes manifests** (Phase 11 has only a Dockerfile).
+- **`RESUME-HERE.md` is as of 2026-10-12** and is stale relative to the later phases.
+- **T9-34:** processor crash drops on-time events; unfixed; needs an ADR (see section 1).
 - **Resilience4j `Bulkhead` is not used;** the in-flight `Semaphore` is a bulkhead in effect.
 - **Authorization (scopes/roles) in ingest is untouched;** only authentication.
 
@@ -833,14 +848,14 @@ Taken from `MILESTONES.md`, the specs and what I found reading the code.
 | **M2** no loss, no double count | Idempotent producer + `acks=all`; commit after the durable write; idempotent upsert guarded by `computed_at`; exactly-once only Kafka → Kafka | `services/sink-writer/src/main/java/com/streampulse/sink/adapter/in/kafka/AggregateBatchListener.java`, `.../adapter/out/postgres/JdbcMetricWindowStore.java` | `NoLossNoDoubleCountIT.failureBetweenWriteAndAckLosesNothingAndDoubleCountsNothing`, `MetricWindowUpsertIT.olderComputedAtDoesNotOverwriteNewer` |
 | **M3** per-session order | Key by `sessionId`; order only within a partition; dedup before repartition; the repartition is the cost | `.../ingest/domain/IngestCommand.java`, `.../processor/adapter/streams/TelemetryTopology.java` | `KafkaIngestIT.sameSessionSamePartition`, `IngestServiceTest.partitionKeyIsSessionId` |
 | **M4** consumer lag | Diagnose first (which lag, hot partition, queue depth); consumers ≤ partitions; shed low-value events | `services/sink-writer/src/main/resources/application.yml`, `MicrometerSinkMetrics.java` | `SinkWiringTest.pollIntervalCoversTheBudget`, `BatchWriterTest.fullQueueRejectsWithinTheOfferTimeout` |
-| **M5** dual write / outbox | Outbox + relay/CDC + idempotent consumers; **not built here**; here: compensating release, Postgres-then-Redis | `.../application/IngestService.java`, `.../sink/application/AggregateSink.java`; Go: `/Users/aashishkumar/Documents/GitHub/GolangExercise/ticket-booking/internal/outbox/relay.go` | `IngestServiceTest.aFailedPublishCanBeRetried`, `AggregateSinkTest.projectionFailureDoesNotFailTheBatch` |
+| **M5** dual write / outbox | Outbox + relay/CDC + idempotent consumers; built in the control plane (same-transaction outbox row, Debezium to `config.changes.v1`); telemetry path: compensating release, Postgres-then-Redis | `services/control-plane/src/main/java/com/streampulse/controlplane/adapter/out/outbox/JdbcConfigChangeOutbox.java`, `.../application/IngestService.java`, `.../sink/application/AggregateSink.java` | `OutboxAtomicityIT`, `IngestServiceTest.aFailedPublishCanBeRetried`, `AggregateSinkTest.projectionFailureDoesNotFailTheBatch` |
 | **M6** backpressure end to end | 429 (quota) / 503 (capacity) + `Retry-After`; fair semaphore; bounded queues; sink buffer full → lag | `IngestService.java`, `BatchWriter.java` | `IngestServiceTest.rejectsWhenSaturated`, `BatchWriterTest.fullQueueRejectsWithinTheOfferTimeout` |
 | **M7** schema evolution | Avro, backward-compatible only; frozen baselines gate it; raw Avro, **no registry here**; bad events → DLT | `libs/contracts/src/main/java/com/streampulse/contracts/codec/AvroBinaryCodec.java` | `SchemaCompatibilityTest.breakingChangesAreRejected`, `addingAnOptionalFieldIsSafe`, `AvroBinaryCodecTest.garbageIsATypedFailure` |
 | **J2** MVC vs WebFlux vs VT | Ingest blocking → MVC + virtual threads; query streams → WebFlux; never block the loop | `.../query/application/BoundedExecutor.java`, ingest `application.yml` | `BlockingIsolationTest.noBlockingPortRunsOnAnEventLoopThread`, `QueryApiWiringTest.runsOnWebFlux` |
 | **J5** batch writer | Bounded queue, one flusher, N-or-T flush, offer timeout, drain on close, **read-write lock for the open-check/close race**, retry then isolate then DLQ | `services/sink-writer/src/main/java/com/streampulse/sink/application/batch/BatchWriter.java` | `BatchWriterTest.closeWaitsForASubmitThatIsAlreadyPastTheOpenCheck` (the deterministic one), `acceptedImpliesWrittenUnderConcurrentSubmitAndClose` (randomised; did not catch the removed lock) |
 | **J6** 3 calls in 300 ms | One deadline; bounded rejecting executor; `orTimeout` does not cancel; degrade per part; structured concurrency is preview in Java 21 (VERIFY) | `services/query-api/src/main/java/com/streampulse/query/application/TitleOverviewService.java` | `TitleOverviewServiceTest.slowCallIsDegradedAndTheBudgetHolds`, `saturatedExecutorDegradesInsteadOfBlocking` |
 | **R1** resilience order | Retry( CircuitBreaker( TimeLimiter( publish ) ) ); retry only fast failures; jitter; mutation-verified | `.../adapter/out/resilience/ResilientEventPublisher.java` | `ResilientEventPublisherTest.timeoutsAreCountedByTheBreaker`, `eachAttemptIsCountedByTheBreaker` |
-| **R2** system health | Five SLIs (success rate, p99, freshness, lag, DLQ); SLO + burn rate proposed, **not built** | `MicrometerSinkMetrics.java`, `docker/observability/grafana/dashboards/streampulse.json` | `MicrometerSinkMetricsTest.freshnessIsAHistogramTimer`, `HealthProbesIT.livenessGroupHasNoDependencies` |
+| **R2** system health | Five SLIs (success rate, p99, freshness, lag, DLQ); SLO + burn-rate rules written in `docker/observability/rules/` but **never wired or verified** | `MicrometerSinkMetrics.java`, `docker/observability/grafana/dashboards/streampulse.json` | `MicrometerSinkMetricsTest.freshnessIsAHistogramTimer`, `HealthProbesIT.livenessGroupHasNoDependencies` |
 | **R4** zero-loss deploy | Readiness off → stop poll → drain → commit → exit; liveness never depends on the broker | `.../ingest/lifecycle/IngestDrainLifecycle.java`, `.../sink/lifecycle/BatchWriterLifecycle.java` | `HealthProbesIT.readinessGoesOutOfServiceOnDrainButLivenessStaysUp`, `BatchWriterLifecycleTest.lifecycleStopsAfterTheListenerContainer` |
 | **R5** dependency slow | Fail open on Redis; breaker + 503 + Retry-After on Kafka; overview degrades per part; sink backs off and lag rises | `IngestService.java`, `TitleOverviewService.java`, `AggregateBatchListener.java` | `IngestServiceTest.publishesAnywayAndReportsDegraded`, `TitleOverviewServiceTest.allCallsFailingStillAnswers`, `AggregateBatchListenerTest.storeFailureMeansNoAck` |
 | **D2** caching dashboard reads | Redis `latest` hash is the read model; one shared reader; coalescing is single-latest-wins; not cache-aside with TTL here | `.../adapter/out/redis/RedisHotProjection.java`, `RedisLatestMetrics.java` | `RedisLatestMetricsIT.readsTheTitlesSeries`, `titleIdMayContainAColon` |
@@ -859,5 +874,11 @@ Taken from `MILESTONES.md`, the specs and what I found reading the code.
 | BatchWriter | 200 records / 100 ms / buffer 2000 / offer 1 s / 3 attempts | configured target |
 | Overview / coalesce / heartbeat | 300 ms / 250 ms / 15 s | configured target |
 | Executor / queue | 8 / 16 | configured target |
-| Sustained throughput | 1,500 events/s sustained for 90 s, 0 rejected (offered rate, not a ceiling: ingest's tenant quota is 2,000 events/s) | measured |
-| p99 ingest latency | p99 68.7 ms (p50 50.0 ms, p95 57.0 ms) | measured |
+| Sustained throughput | 1,500 events/s sustained for 90 s, 0 rejected (offered rate, not a ceiling: ingest's tenant quota is 2,000 events/s) | measured (Phase 3) |
+| Ingest ceiling, default quota | last clean 2,500 events/s; 33.4% 429 at 3,000 events/s | measured (T9-11; one laptop, loadgen co-located, one run) |
+| Ingest-only ceiling, quota lifted | clean at 40,000 events/s; 503 from 45,000 (11.8% errors, p99 595.1 ms at that step); 503 mechanism not proven (breaker ruled out, 0 failed calls; the 64-permit bound is the likely cause) | measured (T9-11; same caveats) |
+| p99 ingest latency | p99 68.7 ms (p50 50.0 ms, p95 57.0 ms) at 1,500 events/s (Phase 3); 76.5 ms at 1,000/s and 70.9 / 59.0 ms at 2,000/s (T9-13) | measured |
+| Overview read latency | p99 27 to 30 ms at about 52 req/s alongside the write load | measured (T9-13; light, unsaturated; which store served the reads not checked) |
+| Freshness per closed window | 5.2 to 5.4 s after window end (the loadgen's own histogram p99 is unreliable back-to-back) | measured (Postgres, T9-13) |
+| End-to-end accounting | 2,000 and 30,000 events with retries re-sent: every closed window exact | measured (T9-12) |
+| Processor `kill -9` | no duplicates; 1,482 of 4,000 and 2,554 of 8,000 on-time events dropped | measured (T9-34; fails) |

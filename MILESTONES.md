@@ -1990,3 +1990,60 @@ configured session timeout). Processing resumed about 40 to 50 s after the kill 
 - No fix attempted. Candidates and their costs are for you and an ADR: a larger grace (freshness
   floor rises by the same amount), emitting revised windows (breaks the one-final-answer contract),
   or draining the backlog before stream time can move. Choosing one changes a documented guarantee.
+
+---
+
+## Phase 9 · T9-13 — latency and freshness at 1,000 and 2,000 events/s · 2026-10-19 · 🚧 in progress
+
+**Setup (one machine, same as T9-11):** Apple M2 Pro, 12 cores, 32 GiB, macOS 27.0.1, OpenJDK 21.
+Full pipeline this time: ingest-gateway, stream-processor, sink-writer and query-api on the host
+via `make run-all`; Kafka (single broker), Redis, Postgres, Keycloak in Docker; loadgen and a
+reader on the same machine. Default config, so the per-tenant quota (2,000 events/s) is not
+lifted; both rates stay under it. Batch 100, 60 s per run, after a 20 s warm-up at 500 events/s.
+Reads: 4 threads, 50 ms pause between requests, `GET /v1/titles/title-N/overview?tenantId=streamflix`
+over 20 titles, about 52 requests/s in total, during the whole write run.
+
+| Run | Ingest p50 / p95 / p99 | Overview read p50 / p95 / p99 | Freshness per closed window |
+|---|---|---|---|
+| 1,000 events/s | 52.9 / 59.4 / 76.5 ms | 24.7 / 27.3 / 29.6 ms | 5.3 to 5.4 s (5 windows) |
+| 2,000 events/s, run a | 45.5 / 54.6 / 70.9 ms | 23.8 / 26.7 / 28.7 ms | 5.2 to 5.4 s (5 windows) |
+| 2,000 events/s, run b | 45.2 / 52.4 / 59.0 ms | 23.9 / 26.7 / 27.4 ms | 5.2 to 5.4 s (6 windows) |
+| (idle reads only, 15 s) | n/a | 27.1 / 32.0 / 37.2 ms | n/a |
+
+All 3,105 to 3,145 reads per run returned 200. Phase 3's single run, at 1,500 events/s, gave ingest
+p99 68.7 ms and freshness near 5.3 s, so these agree with it.
+
+**Freshness** is `computed_at - window_end` per row in `metric_window`, grouped by window, over the
+windows this run produced. Each window has 200 rows and every row of a window landed within 0.1 s
+of the others (min, p50 and max differ by at most 0.1 s), so p50, p95 and p99 are all the same
+figure to within 0.1 s: **about 5.3 s, the 5 s grace period plus roughly 0.3 s of pipeline**. True
+event-to-visible time adds up to a window (10 s) on top.
+
+### Found only by running it
+
+1. **The loadgen's own freshness p99 is wrong whenever a run follows another one.** It reported
+   39.33 s, 112.93 s and 39.63 s for these runs, against 5.3 s from Postgres. A run's last window
+   stays open until later events arrive (the quiet-stream limit in ADR-0012), so the next run's
+   first events close it, and it is recorded then, long after its end, inside the next run's
+   histogram. The per-window table showed it directly for the 1,000 events/s run: the warm-up's two
+   leftover windows at 34 s and 24 s late, every window of the run itself at 5.3 s. The 112.93 s
+   figure for the next run is consistent with a leftover closed about 100 s late, but I did not
+   print that run's leftover window, so that part is inferred. `RESUME-HERE.md` warns about this; a warm-up does not
+   fix it, because the warm-up leaves its own last window open. **Do not quote the loadgen's
+   freshness figure for back-to-back runs.** I have not changed the tool.
+2. My first Postgres cross-check had the same flaw (it counted windows by commit time, not by when
+   they started), which is why the final query keys on `window_start`.
+
+### Honest gaps
+
+- Read load is light and unsaturated: 52 requests/s from 4 threads, with a fresh connection per
+  request from a Python client. This is read latency alongside the write load, not a read capacity
+  test. Reads under load were not slower than idle (p99 27 to 30 ms against 37 ms idle); I would not
+  read that as "faster", since it is within the noise of a 15 s idle sample.
+- I did not check which store served the reads (Redis hot path or Postgres), so this does not say
+  which one would limit reads at higher rates.
+- Only two rates, below the quota, one or two runs each. The 2,000 events/s pair differs by 12 ms
+  at ingest p99 (70.9 against 59.0 ms), so that is the order of the run-to-run noise.
+- Both rates are far below the 40,000 events/s ingest handled alone in T9-11; the downstream
+  stages' own limits are not found. Higher rates need the quota lifted, and I did not run them.
+- Loadgen, the reader and every service shared one machine.

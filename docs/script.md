@@ -1,5 +1,7 @@
 # StreamPulse — Spoken Answer Script (SD1)
 
+> Updated 2026-10-19 to match the code and MILESTONES.md. The per-phase interview pack is in docs/interview/.
+
 **Prompt:** "Design real-time telemetry collection and monitoring for Disney+, Hulu and ESPN+."
 
 **Target: 15–20 minutes. ~150 words/minute. Pause at every `---`.**
@@ -7,7 +9,7 @@ Timings are cumulative. Say the words in **bold** — they are the terms the int
 
 How to read the markers:
 
-- A figure shown as **(not measured: ...)** was never measured. **Do not say a number for it.** Say "I did not measure that; here is how I would." Figures without that tag come from the run recorded in MILESTONES.md (Phase 3, Day 5): one laptop, one broker, not production.
+- A figure shown as **(not measured: ...)** was never measured. **Do not say a number for it.** Say "I did not measure that; here is how I would." Figures without that tag come from the runs recorded in MILESTONES.md (Phase 3 Day 5, and Phase 9 T9-11, T9-12, T9-13, T9-34): one laptop, one broker, one run each, not production.
 - **assumption** — interview-prompt arithmetic (from the Question bank), not a measurement. Say "assume".
 - **Honest note** — a place where the code I wrote differs from the idealised answer. Say it out loud. It is a strength.
 - `Code:` lines are for you, not for saying. Every claim points at a file you can open.
@@ -33,7 +35,7 @@ Phrase to reuse: "I'd pick X because Y. The cost is Z. I'd watch metric M, and i
 
 One principle before the boxes: **telemetry must never break playback.** Every failure mode I show you later ends in that sentence.
 
-Out of scope for the hour: the raw-event data lake to S3 as Parquet, alert routing, multi-region. I'll mention each at the end."
+Out of scope for the hour: a raw-event data lake, alert routing, multi-region. An alert engine and an archive compactor exist, and multi-region is a design document only. I'll mention each at the end."
 
 > Beats: clarify (all four), assumption (30 s), pick (telemetry, not billing), failure (never break playback).
 
@@ -75,7 +77,7 @@ Code: `services/ingest-gateway/src/main/resources/application.yml` (`compression
 
 **Two kinds of 'slow down'**, and I keep them apart. **`429` plus `Retry-After`** means *your* tenant exceeded its quota — your problem. **`503` plus `Retry-After`** means *we* are saturated or the broker path is broken — our problem, another instance may cope. Clients **must add jitter** to `Retry-After`, or every throttled client comes back in the same instant and the second spike is worse than the first.
 
-**[DEPTH] Honest note one.** The Question bank's idealised answer has 429 for all backpressure. In my code, saturation is 503 and 429 is only the per-tenant quota. The OpenAPI file still describes saturation as 429. That is a doc-versus-code mismatch I'd fix, and the code is the source of truth.
+**[DEPTH] Honest note one.** The Question bank's idealised answer has 429 for all backpressure. In my code, saturation is 503 and 429 is only the per-tenant quota. The OpenAPI file now says the same: 429 is tenant quota, 503 is saturation or an unavailable stream.
 
 **[DEPTH] Honest note two.** The idealised answer says client-side gzip. I did not implement or test request decompression. I'd say 'the client should gzip, and I'd verify the server handles `Content-Encoding` before I promised it'.
 
@@ -103,7 +105,7 @@ Code: `services/ingest-gateway/src/main/java/com/streampulse/ingest/adapter/in/r
 
 **Five. Query API.** **WebFlux**. A title overview that fans out to three dependencies under one 300-millisecond budget, a history endpoint, and an **SSE** stream for live dashboards.
 
-**[DEPTH] Honest note.** The idealised answer says Flink or Kinesis, hot store in Redis or OpenSearch, raw events to Firehose and S3. I built Kafka plus Kafka Streams because it runs free and locally and I can test the topology in memory. I did **not** build the raw archive or OpenSearch. And **Postgres is the source of truth; Redis is a rebuildable projection.** I'll defend that in the delivery section.
+**[DEPTH] Honest note.** The idealised answer says Flink or Kinesis, hot store in Redis or OpenSearch, raw events to Firehose and S3. I built Kafka plus Kafka Streams because it runs free and locally and I can test the topology in memory. I did **not** build OpenSearch. An S3 bucket in Terraform against a local AWS simulator and an archive compactor exist, but no service writes raw events to the archive. And **Postgres is the source of truth; Redis is a rebuildable projection.** I'll defend that in the delivery section.
 
 **[DEPTH]** Also: **single Kafka broker, replication factor 1**. `acks=all` is configured, but with one broker it cannot show you what happens when a replica is lost. I won't claim it does.
 
@@ -111,7 +113,7 @@ Also: **MVC with virtual threads in ingest, WebFlux only in the query API.** Dif
 
 > Beats: pick (Kafka + Streams, Postgres durable), cost (no raw archive, single broker), failure (each hop's failure is in the failure section), measure (lag, freshness, 5xx).
 
-**If they push:** "Why not Kinesis plus Flink, like Disney?" — "Disney's public talks describe Kinesis and Flink. I don't claim that is their stack today. I picked Kafka Streams because I could test it with no cloud account. I kept a Kinesis publisher behind the same interface as a comparison, so the choice is one bean."
+**If they push:** "Why not Kinesis plus Flink, like Disney?" — "I do not have a verified source for what their stack is, so I won't claim it. I picked Kafka Streams because I could test it with no cloud account. I kept a Kinesis publisher behind the same interface as a comparison, so the choice is one bean."
 
 Code: `services/ingest-gateway/src/main/java/com/streampulse/ingest/application/IngestService.java`, `services/ingest-gateway/src/main/java/com/streampulse/ingest/adapter/out/kafka/KafkaEventPublisher.java`, `services/stream-processor/src/main/java/com/streampulse/processor/adapter/streams/TelemetryTopology.java`, `services/sink-writer/src/main/java/com/streampulse/sink/adapter/in/kafka/AggregateBatchListener.java`, `services/sink-writer/src/main/java/com/streampulse/sink/application/AggregateSink.java`, `services/query-api/src/main/java/com/streampulse/query/adapter/in/sse/SseStreamController.java`. Decisions: `docs/adr/0006-virtual-threads-over-webflux.md`, `docs/adr/0012-kafka-streams-primary.md`, `docs/adr/0013-sink-durable-then-commit.md`, `docs/adr/0014-webflux-sse-redis-streams.md`. Topics: `docker/compose.yml` (lines creating `telemetry.raw.v1` with 12 partitions and `telemetry.agg.v1` with 6).
 
@@ -151,7 +153,7 @@ Walk the path:
 
 **[DEPTH] One bug the tests found, and one decision.** The bug: I claim the ids in Redis *before* publishing. If the publish then failed, the claims stayed, the client's retry saw every id as a duplicate, got 202 with nothing published, and dropped its copy. Silent data loss reported as success. The fix is a compensating `release()` on failure, and a test that reproduces the old behaviour so nobody deletes it as dead code. The decision: if Redis is down, I **fail open** — publish anyway, count it, and flag `degraded: true`. A duplicate is a wrong number I can reconcile. A gap is gone forever.
 
-**Inside Kafka.** The stream processor runs **`exactly_once_v2`**. Output records, state-store changelog and input offsets commit in **one transaction**. That holds **only Kafka to Kafka**. The moment data leaves Kafka, it does not.
+**Inside Kafka.** The stream processor runs **`exactly_once_v2`**. Output records, state-store changelog and input offsets commit in **one transaction**. That holds **only Kafka to Kafka**. The moment data leaves Kafka, it does not. And I killed the processor once: no duplicates, but on-time events were dropped. I tell that story in the failure section.
 
 **Out of Kafka, into the database.** The sink gives me at-least-once, so correctness has to come from the **write**. Three rules. One: **commit offsets only after the durable write** — auto-commit is off, acknowledgement is manual, and auto-commit is the classic trap because it commits what `poll()` returned, not what you processed. Two: the Postgres write is an **idempotent upsert** on the aggregate's identity — tenant, title, region, metric, window start. Three: the upsert only replaces a row whose **`computed_at` is older or equal**, so a replay or a reordering cannot move a value backwards.
 
@@ -165,7 +167,7 @@ Walk the path:
 
 > Beats: pick (idempotent sink, commit after write), cost (duplicate in live feed; fail-open inflates numbers during a Redis outage), failure (crash between write and ack → redelivery, absorbed), measure (rows vs distinct windows; DLQ rate; `streampulse.ingest.idempotency.unavailable` counter).
 
-**If they push:** "Why not Kafka transactions into Postgres?" — "The database is not a Kafka resource. The alternatives are an outbox or two-phase commit, which add machinery this write doesn't need. An idempotent upsert gets the same outcome."
+**If they push:** "Why not Kafka transactions into Postgres?" — "The database is not a Kafka resource. The alternatives are an outbox or two-phase commit, which add machinery this write doesn't need. An idempotent upsert gets the same outcome. Where I do have a real dual write, in the control plane, I built the outbox with Debezium."
 
 **If they push:** "Why does a poison record not stop the pipeline, but an outage does?" — "They are different failures. A poison record fails the same way every time, so I dead-letter the original bytes and carry on. An outage fails *every* record, so I retry forever with backoff and never dead-letter. If I dead-lettered healthy records because Postgres was briefly down, I'd lose data that was never bad. To tell them apart: when a batch keeps failing, write the records one at a time. If some succeed, the failures are poison. If none succeed, the store is down."
 
@@ -187,13 +189,13 @@ Code: `services/ingest-gateway/src/main/java/com/streampulse/ingest/adapter/out/
 
 **[DEPTH] A guard I added:** an event dated more than 5 minutes in the future is rejected to the dead-letter topic. A device with a wrong clock would otherwise push stream time past every real window and make them all 'late'.
 
-**What I measure:** `streampulse.sink.freshness` — the time from window end to the durable Postgres write. **Honest note:** that metric starts at window **end**, not at event time. So true event-to-dashboard freshness is that number plus up to 10 seconds of window. Measured: p99 5.71 s from the histogram estimate; all 9 closed windows landed 5.2 to 5.4 s after their end in Postgres, and grace is 5 s.
+**What I measure:** `streampulse.sink.freshness` — the time from window end to the durable Postgres write. **Honest note:** that metric starts at window **end**, not at event time. So true event-to-dashboard freshness is that number plus up to 10 seconds of window. Measured, one laptop, one run each: per window in Postgres, 5.2 to 5.4 s after window end at 1,500, 1,000 and 2,000 events a second, and grace is 5 s. The loadgen's own freshness histogram is wrong for back-to-back runs, so I quote Postgres per window.
 
 **[DEPTH] Honest note on the metric itself:** distinct viewers is an **exact set of session ids**, not a HyperLogLog sketch. Each event copies the set, so cost per event is proportional to sessions in the window. It is correct, and it does not survive a million-viewer title. I'd name the approximate sketch as the fix."
 
 > Beats: clarify (freshness target), pick (event time, 10 s, 5 s grace, suppress), cost (15 s floor), failure (quiet partition stalls), measure (freshness p99; late-drop counter).
 
-**If they push:** "Why 5 seconds of grace?" — "It is a target, not a measurement. The mechanism is what matters: grace trades freshness for tolerance of lateness. I'd look at Kafka Streams' dropped-records metric on real traffic and set grace to cover the p99 lateness I actually see."
+**If they push:** "Why 5 seconds of grace?" — "It is a target. And I have the cost of getting it wrong: 5 seconds was too small to absorb a 40 to 50 second restart backlog, which is the crash story later. The mechanism: grace trades freshness for tolerance of lateness. I'd look at Kafka Streams' dropped-records metric on real traffic and set grace to cover the p99 lateness I actually see."
 
 **If they push:** "What if a duplicate arrives after the window closed?" — "Dropped by the window anyway. So the dedup store only needs to remember an id for window plus grace. I give it twice that range, so it stays bounded."
 
@@ -269,7 +271,7 @@ The shape: compute **one deadline** when the request arrives. For each part: `su
 
 **[DEPTH]** **Structured concurrency** is the cleaner alternative, but it is a **preview feature in Java 21**. **VERIFY** the status on the JDK you target before relying on it.
 
-Measured: (not measured: overview p99 latency and degraded-part rate under the load run)."
+Measured: overview read p99 about 27 to 30 ms at about 52 requests a second, alongside 1,000 and 2,000 events a second, light and unsaturated. (not measured: degraded-part rate, and which store served the reads)."
 
 > Beats (both): pick, cost, failure (what the user sees: full buffer → lag; slow dependency → one part marked degraded, still 200), measure.
 
@@ -285,7 +287,7 @@ Code: `services/sink-writer/src/main/java/com/streampulse/sink/application/batch
 
 "'Health' means **user-facing SLIs**, not CPU. Five.
 
-**One. Ingest success rate.** Share of batches that get 202. I have the 5xx ratio on a dashboard.
+**One. Ingest success rate.** Share of batches that get 202. I wrote a dashboard panel for the 5xx ratio.
 **Two. p99 ingest latency.** From the HTTP server histogram on `/v1/events:batch`.
 **Three. End-to-end freshness.** `streampulse.sink.freshness`, window end to durable write.
 **Four. Consumer lag.** On the aggregate topic, and on the raw topic for the processor. Because I acknowledge only after the durable write, lag measures **work not yet stored**, which is exactly what I want it to mean.
@@ -293,17 +295,17 @@ Code: `services/sink-writer/src/main/java/com/streampulse/sink/application/batch
 
 I'd add a sixth I **have not built**: **data completeness**, events received versus heartbeats expected.
 
-**SLO, as a proposal, not a built thing:** '99.9 percent of events visible within 60 seconds.' Keep an **error budget**, and alert on **burn rate** — how fast the budget is going — instead of static thresholds, so a slow leak and a fast fire both page, at different urgency. **[DEPTH] Honest note:** I built the dashboard and the metrics. **I have no alert rules and no burn-rate calculation in the repo.** RED for services, USE for resources: that is how I'd organise the panels.
+**SLOs, both targets:** ingest availability of 99.9 percent, and 99 percent of windows durable within 30 seconds of window end. Keep an **error budget**, and alert on **burn rate** — how fast the budget is going — instead of static thresholds, so a slow leak and a fast fire both page, at different urgency. **[DEPTH] Honest note:** I wrote the metrics, recording rules, multiwindow burn-rate alert rules and four dashboards. **I never ran or wired them:** `make up-obs` does not load them, the rules were never checked with promtool, and the runbook does not exist. RED for services, USE for resources: that is how I'd organise the panels.
 
 **Probes:** liveness answers 'am I broken beyond recovery?' and contains **only** the liveness state — never a dependency. Put Redis in it and one Redis blip restarts every pod at once. I reproduced exactly that by mutation. Readiness answers 'can I take traffic?'.
 
-Measured figures for the dashboard: (not measured: ingest 5xx ratio and 429 rate at the saturation point)."
+Measured, ingest alone, one laptop, one run: with the default quota, 429 on 33.4 percent at 3,000 events a second. With the quota lifted, 503 on 11.8 percent at 45,000. I did not prove the 503 mechanism; the breaker is ruled out and the 64-permit bound is the likely cause."
 
 > Beats: pick (user-facing SLIs), cost (SLO needs an error budget process), failure (alert storm → burn rate), measure (it is the measurement).
 
 **If they push:** "Why is freshness better than lag?" — "Lag counts records. Freshness counts what the user feels: how old is the number on screen. A system can have zero lag and a stalled window, and only freshness shows it."
 
-Code: `docker/observability/grafana/dashboards/streampulse.json` (panels: ingest accepted/s, ingest 5xx and p99, consumer lag, freshness p99, dead-letter rate, batch-writer queue depth), `services/sink-writer/src/main/java/com/streampulse/sink/config/MicrometerSinkMetrics.java`, `services/ingest-gateway/src/main/java/com/streampulse/ingest/config/MicrometerIngestMetrics.java`, `services/stream-processor/src/main/java/com/streampulse/processor/config/MicrometerProcessorMetrics.java`. Tests: `HealthProbesIT.livenessGroupHasNoDependencies`, `HealthProbesIT.readinessGoesOutOfServiceOnDrainButLivenessStaysUp`, `StreamsStateHealthIndicatorTest.runningAndRebalancingAreUp`.
+Code: `docker/observability/grafana/dashboards/streampulse.json` (also `streampulse-red.json`, `streampulse-jvm.json`, `streampulse-slo.json`; panels: ingest accepted/s, ingest 5xx and p99, consumer lag, freshness p99, dead-letter rate, batch-writer queue depth), `services/sink-writer/src/main/java/com/streampulse/sink/config/MicrometerSinkMetrics.java`, `services/ingest-gateway/src/main/java/com/streampulse/ingest/config/MicrometerIngestMetrics.java`, `services/stream-processor/src/main/java/com/streampulse/processor/config/MicrometerProcessorMetrics.java`. Tests: `HealthProbesIT.livenessGroupHasNoDependencies`, `HealthProbesIT.readinessGoesOutOfServiceOnDrainButLivenessStaysUp`, `StreamsStateHealthIndicatorTest.runningAndRebalancingAreUp`.
 
 ---
 
@@ -346,7 +348,7 @@ Code: `services/sink-writer/src/main/resources/application.yml` (`concurrency: 3
 
 **Query API dependency slow.** The overview answers **200** with that part empty and named in `degraded`.
 
-**Processor crash.** State restores from the changelog; `exactly_once_v2` prevents a double publish. **[DEPTH] Honest note:** I verified the happy path end to end. I did **not** kill the processor mid-window. That recovery claim is asserted by the design, not demonstrated.
+**Processor crash.** State restores from the changelog; `exactly_once_v2` prevents a double publish. **[DEPTH] Honest note, and it is a failure.** I ran `kill -9` on the processor mid-window. There were no duplicates. But on-time events were dropped as expired-window records: 1,482 of 4,000 in one run and 2,554 of 8,000 in another, each equal to the processor's own WARN count. My likely mechanism is that catching up a multi-partition backlog advanced stream time past the 5 second grace. That is not proven. It is not fixed. It is invisible to the service metrics. Each fix changes a documented guarantee: a larger grace, emitting revisions, or draining the backlog first, so it needs an ADR. One laptop, one broker, one crash type.
 
 **Bad bytes or invalid event.** Dead-lettered with a reason; the stream continues.
 
@@ -376,9 +378,9 @@ Code: `services/ingest-gateway/src/main/java/com/streampulse/ingest/adapter/out/
 
 **6. The live feed.** One Redis stream shared by all tenants with a ten-thousand entry cap, and every query instance reads the whole thing. Next step: **a stream per tenant** or per tenant shard.
 
-**7. Raw archive.** Not built. I'd add Firehose or a Kafka Connect sink to S3 as Parquet for ad-hoc analytics, off the hot path.
+**7. Raw archive.** Half built. A compactor merges small archive objects into one per tenant and hour, and an S3 bucket exists in Terraform, both only tested against a local simulator. Nothing writes raw events to the archive yet. I'd add a Kafka Connect sink or Firehose to feed it, off the hot path.
 
-Measured baseline I'd scale from: 1,500 events/s sustained for 90 s, 0 rejected (offered rate, not a ceiling: ingest's tenant quota is 2,000 events/s) and p99 68.7 ms (p50 50.0 ms, p95 57.0 ms)."
+Measured baseline, one laptop, loadgen on the same machine: ingest alone ran clean at 40,000 events a second with the quota lifted, and shed 503s from 45,000. With the default quota it stops at 3,000. At 1,500 events a second through the full pipeline, p99 was 68.7 ms. I would not quote 45,000 as capacity."
 
 > Beats: assumption (1M/s → 86B keys, 30M ids), pick (pipeline, salt, sketch), cost (two-stage aggregation complexity, sketch error), failure, measure.
 
@@ -400,19 +402,20 @@ Code: `services/ingest-gateway/src/main/java/com/streampulse/ingest/adapter/out/
 
 Here is what is **not** done, so you hear it from me:
 
-- **Every number is a target, not a measurement,** except those I filled in from the load run.
+- **Every number is a target, not a measurement,** except those I measured in the Phase 3 and Phase 9 runs: one laptop, one broker.
+- **Open defect: a processor crash drops on-time events.** After `kill -9`, 1,482 of 4,000 and 2,554 of 8,000 events were dropped as expired-window records, with no duplicates. Likely cause, not proven: backlog catch-up pushing stream time past the 5 second grace. Not fixed, invisible to service metrics, and the fix needs an ADR.
 - **Single Kafka broker.** `acks=all` is configured; it has not been shown to protect against a lost replica.
 - **No authentication on the query API.** Any client can read any tenant.
-- **No alert rules or burn-rate.** Metrics and a dashboard exist.
-- **No autoscaling on lag, no Kubernetes manifests.**
+- **Alert and burn-rate rules are written but never run or wired.** Metrics and dashboards exist.
+- **No autoscaling on lag, no Kubernetes manifests.** Only a Dockerfile.
 - **No hot-key salting.** One hot title is one task.
 - **Exact distinct sets, not HyperLogLog.**
 - **Redis is rebuildable in principle; nothing rebuilds it yet.**
-- **No outbox.** My Go ticket-booking project has one; this project does not need it, because the sink writes Postgres first and Redis is derived. I'd tell you where I did it.
-- **Processor mid-window crash recovery is not demonstrated,** and no test sends a real SIGTERM.
-- **No raw archive to S3.**
+- **No outbox in the sink,** because it writes Postgres first and Redis is derived. The control plane does have one, with Debezium.
+- **No test sends a real SIGTERM,** and the sink was never killed.
+- **Nothing writes the raw archive.** The S3 bucket and compactor exist; the compactor runs only in tests.
 
-Where I'd go with more time: measure first, then salting plus a sketch, then lag-based autoscaling and burn-rate alerts."
+Where I'd go with more time: fix the crash defect with an ADR, then salting plus a sketch, then wire the alert rules and add lag-based autoscaling."
 
 **If they push:** "What did the tests teach you?" — "Three things. A randomised concurrency test gave me false confidence until I forced the interleaving. Nine of ten tests still passed with the decorator order wrong, so I mutate the code to prove a test can fail. And a green suite did not mean the app ran: running it found a missing system property the tests had and `bootRun` did not."
 
@@ -429,19 +432,24 @@ Where I'd go with more time: measure first, then salting plus a sketch, then lag
 | Series count, aggregate rate | 10,000 series, ~2,000 records/s | **assumption** (1,000 titles × 10 regions × 2 metrics ÷ 10 s) | arithmetic |
 | Dedup state at peak | ~30 M ids | **assumption** (1 M/s × 30 s retention) | `TelemetryTopology.Config.dedupRange()` × 2 |
 | Redis claim keys at 24 h TTL | ~86 B | **assumption** (1 M/s × 86,400 s) | `idempotency-ttl: 24h` in ingest `application.yml` |
-| Window / grace / freshness floor | 10 s / 5 s / 15 s from window start | configured target, **not measured** | stream-processor `application.yml` |
+| Window / grace / freshness floor | 10 s / 5 s / 15 s from window start | configured target (the observed 5.2 to 5.4 s is below, in the freshness row) | stream-processor `application.yml` |
 | Max batch / in-flight / permit wait | 500 / 64 / 250 ms | configured target | ingest `application.yml` |
 | Raw / aggregate partitions | 12 / 6 | configured (local compose) | `docker/compose.yml` |
 | Batch writer | 200 records, 100 ms, buffer 2,000, offer 1 s | configured target | sink-writer `application.yml` |
 | Overview budget / coalesce / heartbeat | 300 ms / 250 ms / 15 s | configured target | query-api `application.yml` |
-| Sustained throughput | 1,500 events/s sustained for 90 s, 0 rejected (offered rate, not a ceiling: ingest's tenant quota is 2,000 events/s) | measured | load run |
-| p99 ingest latency | p99 68.7 ms (p50 50.0 ms, p95 57.0 ms) | measured | load run |
-| Freshness p99 | p99 5.71 s from the histogram estimate; all 9 closed windows landed 5.2 to 5.4 s after their end in Postgres, and grace is 5 s | measured | `streampulse.sink.freshness` |
+| Sustained throughput, Phase 3 | 1,500 events/s for 90 s, 0 rejected (offered rate, not a ceiling) | measured, one run | Phase 3 Day 5 |
+| Ingest-only ceiling, quota lifted | clean at 40,000 events/s; 503s from 45,000 (11.8% errors, p99 595.1 ms at that step); 503 mechanism not proven | measured, one run, loadgen on the same laptop | Phase 9 T9-11, Run B |
+| Default quota as a ceiling | 429s from 3,000 events/s (33.4% refused); last clean 2,500 | measured, one run | Phase 9 T9-11, Run A |
+| Ingest JVM while refusing 105,800 events | heap 45.5 to 313 MiB, threads 34 to 35 | measured, one 16 s overload | Phase 9 T9-11 |
+| p99 ingest latency | 68.7 ms at 1,500/s (p50 50.0, p95 57.0); 76.5 ms at 1,000/s; 70.9 and 59.0 ms at 2,000/s | measured, full pipeline, noise about 12 ms | Phase 3 Day 5, Phase 9 T9-13 |
+| Freshness | 5.2 to 5.4 s per window after window end, in Postgres, at 1,000 and 2,000 events/s; loadgen's own histogram unreliable back-to-back | measured | Phase 9 T9-13 |
+| Overview read latency | p50 about 24 ms, p99 27 to 30 ms at about 52 req/s, light and unsaturated | measured | Phase 9 T9-13 |
+| End-to-end accounting, happy path | 2,000 and 30,000 events: every closed window exact; 400 and 6,000 re-sent duplicates not double-counted | measured | Phase 9 T9-12 |
+| Processor kill -9, outage 40 to 50 s | 1,482 of 4,000 and 2,554 of 8,000 on-time events dropped as expired-window records; no duplicates; open defect | measured | Phase 9 T9-34 |
 | Flush latency / queue depth | (not measured: batch flush latency p99 and peak queue depth under the load run) | not measured | `streampulse.sink.batch.flush`, `streampulse.sink.batch.queue.depth` |
 | Peak lag and drain time | (not measured: peak consumer lag on telemetry.agg.v1 during the load run and time to drain after load stops) | not measured | consumer lag panel |
-| Overview p99 and degraded rate | (not measured: overview p99 latency and degraded-part rate under the load run) | not measured | load run |
+| Overview degraded-part rate | (not measured: degraded-part rate; which store served the reads was not checked) | not measured | load run |
 | SSE streams per instance | (not measured: concurrent SSE streams per query-api instance and CPU/heap at that count) | not measured | load run |
-| 5xx ratio and 429 rate at saturation | (not measured: ingest 5xx ratio and 429 rate at the saturation point) | not measured | load run |
 | lz4 compression ratio | (not measured: lz4 compression ratio on realistic event payloads) | not measured | load run |
 
 ---
