@@ -23,12 +23,18 @@ Each line: failing test first, then code. Tick only with passing output pasted i
       `>` to `>=`, stop-at-first-breach removed; each went red, restored, green.
       Spec said `Pacing`/`RunSummary` and `IngestSaturationTest`; separate small classes read
       better than growing those two, and "memory bound" cannot be asserted from the client (see T9-11)
-- [ ] T9-11 ramp run for real against the local stack; output pasted into `MILESTONES.md` with
-      hardware spec. Also observe, from the ingest JVM's own metrics during the run, that heap and
-      in-flight count stay bounded while 503s rise (REQ-RL-02): loadgen alone cannot see that
-- [ ] T9-12 `EndToEndAccountingIT` fails (no invariant test exists) → a test that sums closed-window
-      viewer samples against events sent for one full run and asserts they reconcile within the
-      stated window-close delay (closes the Phase 3 "no end-to-end event accounting" gap)
+- [x] T9-11 ramp run for real against the local stack; output pasted into `MILESTONES.md` with
+      hardware spec. Ingest only (no downstream services ran). Default config stops at the
+      per-tenant quota (429, about 3,000/s); with the quota lifted, clean at 40,000 events/s and
+      503s from 45,000. Heap and threads sampled during the 503 phase (REQ-RL-02): bounded over a
+      short run. Which mechanism issued the 503s is NOT proven (breaker ruled out, permit bound
+      likely); see MILESTONES
+- [x] T9-12 end-to-end accounting over whole runs, using the existing `scripts/accounting-check.py`
+      against the live stack instead of a new `EndToEndAccountingIT` (a Testcontainers version
+      would need Kafka, Postgres, Redis and four services). 2,000 and 30,000 events, retries
+      re-sent: every closed window matches on count, sessions and error ratio. Mutation (one
+      event under-counted in the script's bookkeeping) went red on that window; restored.
+      Happy path only: accounting under a crash is T9-34
 - [ ] T9-13 freshness/latency run repeated at a second rate (not just the one Phase 3 number);
       p50/p95/p99 for ingest, freshness, query-api read, pasted into `MILESTONES.md`
 
@@ -54,9 +60,11 @@ Each line: failing test first, then code. Tick only with passing output pasted i
       (no hang) and automatic recovery
 - [ ] T9-33 `AlertEngineClientFaultIT` fails → partition alert-engine from query-api/control-plane,
       assert the HTTP clients time out and surface a problem, not a hang
-- [ ] T9-34 `ProcessorCrashMidWindowIT` fails → `docker kill` a stream-processor instance mid-window,
-      assert on restart: no double-counted aggregate, no lost one (closes the Phase 3 "not tested:
-      a processor crash mid-window" gap)
+- [ ] T9-34 processor crash mid-window. MEASURED, AND IT FAILS: with `kill -9` and a 40-50 s outage,
+      events are dropped as expired-window records (1,482 of 4,000 and 2,554 of 8,000; each matches
+      the processor's own WARN count exactly). No duplicates. Run through the live stack with
+      `scripts/accounting-check.py --at`, not an IT. Stays unticked until the defect is fixed or
+      the guarantee is rewritten in an ADR; the failing run is the red step. See MILESTONES
 - [ ] T9-35 `BrokerKilledDuringLoadIT` fails → kill the Kafka container itself under load, assert
       consumer lag grows then fully drains once it returns, with the single-broker availability
       gap stated plainly in the result, not hidden

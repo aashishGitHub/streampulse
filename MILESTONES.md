@@ -1734,3 +1734,259 @@ Mutations, each restored afterwards:
   failure-mode row now says so instead of naming a test that was never going to prove it.
 - The 1% limit and the 90% client-limited cutoff are targets/heuristics, not measured values.
 - A ramp skips the freshness scrape that the single run does.
+
+---
+
+## Phase 9 · T9-11 — first saturation measurements of ingest · 2026-10-19 · 🚧 in progress
+
+**Hardware and setup (every number below is from this one machine):** Apple M2 Pro, 12 cores,
+32 GiB, macOS 27.0.1, OpenJDK 21.0.12. ingest-gateway run with `bootRun` on the host, Kafka
+(single broker, replication factor 1), Redis, Postgres, Keycloak and moto in Docker, and the
+loadgen on the same machine, so it competes with ingest for CPU. **Only ingest and its Kafka
+producer were under test:** no stream-processor, sink-writer or query-api was running. Batch 100,
+1,000 sessions. Each run was preceded by a 20 s warm-up at 500 events/s (the cold run's p95 was
+1,587 ms, the warm one's 82 ms).
+
+### Run A — default config (per-tenant quota: refill 2,000 events/s, burst 10,000)
+
+```
+$ LOADGEN_CLIENT_SECRET=... ./gradlew :tools:loadgen:run --args="--rate 1000 --ramp-to 4000 --ramp-step 500 --step-duration 20"
+target/s  offered/s    202    429    503  other   errors  latency (202 only)
+    1000     1002.6    200      0      0      0     0.0%  p99=74.9 ms
+    1500     1501.1    301      0      0      0     0.0%  p99=153.5 ms
+    2000     2000.4    400      0      0      0     0.0%  p99=63.6 ms
+    2500     2499.6    499      1      0      0     0.2%  p99=64.2 ms
+    3000     3002.4    400    201      0      0    33.4%  p99=67.8 ms
+saturated at 3000 events/s (error rate over 1%), mostly 429 (per-tenant quota working as designed)
+last clean rate 2500 events/s
+```
+
+This is the quota, not capacity: with a 2,000/s refill, 3,000/s offered should see 1 - 2000/3000 =
+33.3% refused, and the loadgen saw 33.4%. The 1 throttled batch at 2,500/s is the 10,000-event
+burst allowance running out. The ramp separated the two causes as REQ-RL-01 asks.
+
+### Run B — quota effectively removed, to find capacity
+
+Ingest restarted with `STREAMPULSE_INGEST_QUOTA_REFILL_PER_SECOND=100000000` and
+`STREAMPULSE_INGEST_QUOTA_CAPACITY=1000000000` (environment only, no file edit). No 429 appeared
+at any step, which is how I know the override bound.
+
+```
+$ ... --args="--rate 5000 --ramp-to 50000 --ramp-step 5000 --step-duration 20"
+target/s  offered/s    202    429    503  other   errors  latency (202 only)
+    5000     4998.3   1000      0      0      0     0.0%  p99=60.2 ms
+   10000     9979.2   2000      0      0      0     0.0%  p99=74.8 ms
+   15000    14949.9   3001      0      0      0     0.0%  p99=153.2 ms
+   20000    19954.9   4000      0      0      0     0.0%  p99=162.3 ms
+   25000    24951.0   5000      0      0      0     0.0%  p99=195.3 ms
+   30000    29921.9   6001      0      0      0     0.0%  p99=92.2 ms
+   35000    34916.1   7001      0      0      0     0.0%  p99=111.0 ms
+   40000    39895.2   8000      0      0      0     0.0%  p99=107.8 ms
+   45000    44357.2   7943      0   1058      0    11.8%  p99=595.1 ms
+saturated at 45000 events/s (error rate over 1%), mostly 503 (the service running out of capacity)
+last clean rate 40000 events/s
+```
+
+On this setup, ingest sustained 40,000 events/s with no errors and began refusing with 503 at
+45,000 events/s. The loadgen offered 44,357/s of the 45,000 asked (98.6%), so it was not the
+limit at the breach step. `NFR-IG-02` (target 5,000 events/s locally) is met with a wide margin
+for ingest alone; that target is not yet replaced by this number (T9-50).
+
+### REQ-RL-02: what the ingest JVM did while refusing
+
+Sampled every 2 s from `/actuator/prometheus` through the whole of run B (93 samples):
+
+```
+heap used     45.5 .. 313.0 MiB   (rises and falls: 131.7, 313.0, 240.9, 200.1, 216.1 during the 503 phase)
+threads live  34 .. 35
+503'd events  0 -> 105,800        (the loadgen counted 1,058 x 503 x 100 events: the two agree exactly)
+```
+
+While 105,800 events were being refused, heap moved up and down and live threads stayed at 35.
+That fits shedding by rejection rather than by queueing, but it is 16 s of overload, which is too
+short to rule out a slow leak, and I did not read the JVM's configured maximum heap.
+
+### Found by running it
+
+1. **The first measurement would have measured the quota.** Run A is the evidence: a default-config
+   ramp always stops at the per-tenant quota (about 2,500 to 3,000 events/s) and says nothing about
+   capacity. Capacity needed the quota lifted.
+2. **My first sampler used metric names I had guessed.** The real ones are
+   `streampulse_ingest_events_rejected_events_total` (503) and
+   `streampulse_ingest_events_throttled_events_total` (429). It printed zeros until I read the
+   endpoint instead of assuming.
+3. **The circuit breaker did not open.** After run B, `resilience4j_circuitbreaker_calls_seconds_count`
+   shows 44,046 successful and 0 failed calls for `eventPublisher`. So the 503s did not come from
+   the breaker (ADR-0009).
+
+### Honest gaps
+
+- **The mechanism behind the 503s is not proven.** The breaker is ruled out by its metrics. In the
+  code, `IngestService` returns 503 when no in-flight permit (64, `permitWait` 250 ms) frees up in
+  time, and `IngestExceptionHandler` has three other 503 paths. By elimination the permit bound is
+  the likely cause, but I did not see the response body or a log line. A rough estimate from the
+  mean publish time (about 16 ms) would put only a handful of permits in use at 450 batches/s,
+  which does not obviously explain it; the p99 of 595 ms at the breach step may. Not resolved.
+- **Ingest only.** Nothing downstream ran, so this says nothing about stream-processor, sink-writer
+  or query-api limits, and the broker was never under consumer load. That is the full-pipeline
+  half of REQ-RL-01/03/04 and is still open (T9-12, T9-13).
+- Loadgen and ingest shared one machine's 12 cores, so the real ceiling is probably higher than
+  45,000 events/s with the load generator elsewhere. The direction of that error is a reasonable
+  guess, not a measurement.
+- One run per configuration, 20 s per step, no repeats, so there is no variance estimate. The gap
+  between "clean at 40,000" and "breach at 45,000" is one 5,000 step wide.
+- The raw samples were kept in a scratch directory, not committed; the numbers above are the record.
+
+---
+
+## Phase 9 · T9-12 — end-to-end event accounting over whole runs · 2026-10-19 · 🚧 in progress
+
+`scripts/accounting-check.py` was already committed but its output was never recorded, and
+`RESUME-HERE.md` still listed accounting as "asserted in pieces, never over a whole run". It sends
+events with known ids, times and sessions into one aggregate key (a unique region per run), re-sends
+every 5th batch byte-for-byte as a retrying client would, advances stream time with a closing event,
+then compares **every closed window** in Postgres with what was sent: event count, distinct
+sessions, and error ratio. Run against the full stack (`make up-core`, `make run-all`): ingest ->
+Kafka -> stream-processor -> Kafka -> sink-writer -> Postgres.
+
+I used this script rather than writing `EndToEndAccountingIT`. A Testcontainers version would need
+Kafka, Postgres, Redis and four services in one test and would duplicate what this already checks.
+
+```
+$ LOADGEN_CLIENT_SECRET=... python3 -I scripts/accounting-check.py
+run 0a349477: 2000 events in 20 batches, region=acct-0a349477
+sent 2000 unique events (+400 re-sent as retries, +0 connection retries); closing event at window 05:57:20
+window                         sent   stored    viewers   err_rate  verdict
+2026-10-19T05:56:50.000Z        300      300      97/97     0.1000       ok
+2026-10-19T05:57:00.000Z        900      900    100/100     0.1000       ok
+2026-10-19T05:57:10.000Z        800      800    100/100     0.1000       ok
+closed windows checked: 3   events sent: 2000   events stored: 2000
+RESULT: PASS
+
+$ ... --events 30000 --interval 0.2
+sent 30000 unique events (+6000 re-sent as retries, +0 connection retries)
+closed windows checked: 10   events sent: 30000   events stored: 30000
+RESULT: PASS    (10 of 10 windows ok, 0 FAIL)
+```
+
+Every unique event was stored exactly once, and the 400 and 6,000 re-sent duplicates were not
+double-counted (ingest's idempotency key plus the processor's dedup).
+
+**Can the check fail?** I made the script under-count one event in its own bookkeeping, then ran it:
+
+```
+window                         sent   stored    viewers   err_rate  verdict
+2026-10-19T05:59:30.000Z        799      800    100/100     0.1000     FAIL
+...
+closed windows checked: 3   events sent: 1999   events stored: 2000
+RESULT: FAIL (1 window(s))
+```
+
+Red on exactly the affected window, the others still `ok`. Restored; `git diff scripts/` is empty.
+
+### Honest gaps
+
+- **This closes the happy-path accounting gap only.** No service was killed, restarted or slowed
+  during these runs. Accounting under a crash is T9-34.
+- Closed windows only. The window after the last event is closed by one synthetic event; the
+  script cannot account for events that are still in an open window, by design.
+- Single region key, so one aggregate key and one partition per run: this does not exercise events
+  spread across partitions or tenants.
+- 30,000 events at about 500 events/s, one batch every 0.2 s. It is a correctness check, not a load
+  level; the Phase 3 gap involved 135,100 events at 1,500 events/s.
+- Late events (the loadgen's `--late-fraction`) are not covered; the script sends none.
+- The mutation tests the verdict logic, not loss detection end to end: a real lost event would show
+  up as `stored` below `sent`, which is the comparison that went red.
+
+---
+
+## Phase 9 · T9-34 — stream-processor killed mid-window · 2026-10-19 · ❌ FAILS (events lost)
+
+REQ-RS-05 and ADR-0012 claim that after a processor crash nothing is lost and nothing is counted
+twice. I ran the accounting script with `kill -9` on the processor JVM partway through the send
+phase and restarted it a few batches later (the script's `--at BATCH:CMD` hook; `exactly_once_v2`,
+state in `/tmp/streampulse/stream-processor`):
+
+```
+$ python3 -I scripts/accounting-check.py --events 4000 \
+    --at "12:pkill -9 -f StreamProcessorApplication" \
+    --at "20:cd <repo> && nohup ./gradlew :services:stream-processor:bootRun > build/logs/stream-processor-restart.log 2>&1 &"
+window                         sent   stored    viewers   err_rate  verdict
+2026-10-19T06:01:00.000Z        200      200      91/91     0.1000       ok
+2026-10-19T06:01:10.000Z        900      900    100/100     0.1000       ok
+2026-10-19T06:01:20.000Z        900      155     18/100     0.0774     FAIL
+2026-10-19T06:01:30.000Z        900      163     18/100     0.1350     FAIL
+2026-10-19T06:01:40.000Z       1000     1000    100/100     0.1000       ok
+2026-10-19T06:01:50.000Z        100      100      61/61     0.1000       ok
+closed windows checked: 6   events sent: 4000   events stored: 2518
+RESULT: FAIL (2 window(s))
+```
+
+**Events were lost, silently.** Nothing was counted twice (no window stored more than was sent).
+The windows spanning the outage hold only a fraction of their events, and the loss is clustered,
+not random: 155 events picked at random from 100 sessions would touch about 79 of them (100 x
+(1 - 0.99^155)), but only 18 sessions appear. Whole groups of events went missing together.
+
+### Where the events went (measured, not inferred)
+
+- The sink did not overwrite a good value with a bad one: `telemetry.agg.v1` holds exactly 12
+  records for the run's region, one per window per metric.
+- The processor dropped them. `KStreamWindowAggregate` logged one
+  `WARN Skipping record for expired window` per lost event: **1,482 warnings for 1,482 missing
+  events** (4,000 - 2,518), and the task `1_3` counter `kafka_stream_task_dropped_records_total`
+  reads 1,482.
+- One of the warnings, in full:
+  `partition=[3] offset=[1637] timestamp=[1792389680520] window=[1792389680000,1792389690000) expiration=[1792389705957] streamTime=[1792389710957]`.
+  The record belongs to the 06:01:20 window, but the aggregation task's stream time had already
+  moved to 06:01:50.957, past that window's close (window end + 5 s grace).
+
+### Is my test causing it? No (second run)
+
+The first run's closing event raced the recovery, so I could not tell the tick from the backlog. I
+re-ran with a longer send phase so the tick arrived long after processing resumed:
+
+```
+$ ... --events 8000 --at "12:pkill -9 ..." --at "16:<restart>"
+closed windows checked: 10   events sent: 8000   events stored: 5446
+RESULT: FAIL (4 window(s))   (windows 06:04:50, 06:05:00, 06:05:10, 06:05:20)
+expired-window warnings: 2,554    missing events: 2,554
+```
+
+The stream time at those drops (1792389915445 = 06:05:15.4 and later) is **before** the tick was
+sent (06:06:20): the backlog itself advanced it.
+
+### Likely mechanism (consistent with the evidence, not proven)
+
+Raw events are keyed by session, so one aggregate's events are spread over all 12 raw partitions.
+After a restart the processor works off 12 backlogged partitions, and what it writes to the single
+repartition partition for that aggregate is not in event-time order: a record from a later part of
+the outage can be processed before earlier records from another partition. Stream time then jumps
+past windows that still have unprocessed on-time events, and those are dropped as expired. The
+5 s grace period is sized for out-of-order arrival under steady state, not for catching up a
+backlog after an outage of 40 to 50 s. Not tested: a variant with a shorter outage, a graceful
+`SIGTERM` restart, or a larger grace.
+
+Timing, for context: the restarted JVM reported `Started in 1.2 seconds`, but partitions were not
+assigned for roughly another 30 s (the dead member's session had to expire; I did not check the
+configured session timeout). Processing resumed about 40 to 50 s after the kill in both runs.
+
+### What this means
+
+- **REQ-RS-05 does not hold for outages longer than the grace period.** Exactly-once held at the
+  Kafka level (no duplicates, nothing lost in a topic); the aggregate is nonetheless wrong.
+- **It is invisible to the service's own metrics.** `streampulse_processor_*` has counters for
+  duplicates and rejected events but none for late drops; only the Kafka Streams built-in counter
+  and a WARN log show it. Nothing alerts on it.
+- ADR-0012 states the quiet-stream limit (a window waits for stream time to advance). It does not
+  describe this one: on-time events lost after a restart.
+
+### Honest gaps
+
+- One crash type only (`kill -9` of the single processor instance, single broker). Not tried:
+  graceful shutdown, a second instance taking over, a crash with a short outage.
+- The accounting script only sees closed windows for one aggregate key. Other keys in the same
+  topic were not checked, and I did not examine whether the 18/100 session pattern is exactly the
+  partition split I describe.
+- No fix attempted. Candidates and their costs are for you and an ADR: a larger grace (freshness
+  floor rises by the same amount), emitting revised windows (breaks the one-final-answer contract),
+  or draining the backlog before stream time can move. Choosing one changes a documented guarantee.

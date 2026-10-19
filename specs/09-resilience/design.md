@@ -67,7 +67,7 @@ no new reporting format.
 | Kafka broker down during ingest | breaker opens, Redis-fallback publish continues | `BrokerDownResilienceIT` (new, toxiproxy) |
 | Postgres down during control-plane write | 503/503-equivalent, no hang, recovers on reconnect | `ControlPlaneDatastoreDownIT` (new, toxiproxy) |
 | Redis down during feed read | per-request failure, no hang | `ActivityFeedDatastoreDownIT` (new, toxiproxy) — extends the existing `reportsA503WhenAStoreIsDown` unit test to a real injected fault |
-| stream-processor instance killed mid-window | no double count, no loss on rebalance | `ProcessorCrashMidWindowIT` (new) — the gap explicitly named "not tested" in the Phase 3 report |
+| stream-processor instance killed mid-window | claimed: no double count, no loss. **Observed (kill -9, 40-50 s outage): no double count, but on-time events dropped as expired-window records** | `scripts/accounting-check.py --at` against the live stack; MILESTONES T9-34. A regression test exists only once a fix does |
 | Virtual thread pinned by a blocking call | detected and localized | `PinnedThreadLoadIT` (new) — runs ingest-gateway with `-Djdk.tracePinnedThreads`, asserts the log is empty or names the exact call site if not |
 
 ## Decisions
