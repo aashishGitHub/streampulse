@@ -1691,3 +1691,46 @@ Restored to `kafka:29093` → green again. The normal path is unaffected: `kafka
   proxies yet; that is T9-30 onwards.
 - Only `enabled: false` (a hard partition) is exercised. Latency, bandwidth and timeout toxics are
   not yet used by anything.
+
+---
+
+## Phase 9 · T9-10 — saturation search in loadgen · 2026-10-19 · 🚧 in progress
+
+The existing `Runner` obeys `Retry-After`, so at saturation it throttles itself and the offered rate
+falls: the Phase 3 run could never have found a ceiling. A ramp therefore needs a no-backoff
+mode; otherwise it measures the load generator's politeness.
+
+New: `--ramp-to`, `--ramp-step`, `--step-duration`. `--rate` is the first step. The search stops at
+the first step whose error rate exceeds 1% (a target for what counts as saturated), names the
+dominant cause (429 quota vs 503 capacity vs other), and prints a warning when the client could
+not offer the rate it was asked for, since a breach there describes the load generator.
+
+Red first: `./gradlew :tools:loadgen:test` failed to compile (`RampPlan`, `StepResult`,
+`SaturationFinder`, `RampRunner`, `RampReportFormatter`, `ArgParser.parseRamp` and the six-argument
+`Runner` constructor did not exist). Then green:
+
+```
+$ ./gradlew :tools:loadgen:spotlessApply :tools:loadgen:test
+BUILD SUCCESSFUL
+tests=88 skipped=0 failures=0 errors=0
+  RampPlanTest 5   SaturationFinderTest 10   RampRunnerTest 4   RampReportFormatterTest 3
+  RunnerTest 5     ArgParserTest 18
+```
+
+Mutations, each restored afterwards:
+
+| Mutation | Test that went red | Evidence |
+|---|---|---|
+| `Runner.pause` ignores the no-backoff flag | `RunnerTest.keepsOfferingTheRequestedRateWhenToldNotToBackOff` | `Expecting actual: 2L to be greater than: 10L` (about 16 requests expected) |
+| breach test `>` changed to `>=` | `SaturationFinderTest.exactlyOnePercentIsNotABreachButJustOverIs` | failed on the boundary |
+| stop-at-first-breach removed | `RampRunnerTest.stopsAfterTheFirstBreachInsteadOfPushingAnAlreadyFailingServerHarder` | failed |
+
+### Honest gaps
+
+- **Not run against a real ingest-gateway.** Every test uses a fake step executor or a stub HTTP
+  server. No saturation number exists yet; that is T9-11.
+- REQ-RL-02 (shed load, do not grow unbounded queues or memory) cannot be shown from the client.
+  It needs the ingest JVM's own metrics during the ramp; T9-11 carries that, and the spec's
+  failure-mode row now says so instead of naming a test that was never going to prove it.
+- The 1% limit and the 90% client-limited cutoff are targets/heuristics, not measured values.
+- A ramp skips the freshness scrape that the single run does.

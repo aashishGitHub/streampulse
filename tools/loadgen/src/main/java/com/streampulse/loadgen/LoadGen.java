@@ -27,8 +27,10 @@ public final class LoadGen {
         }
 
         LoadGenConfig config;
+        Optional<RampPlan> ramp;
         try {
             config = ArgParser.parse(args);
+            ramp = ArgParser.parseRamp(args);
         } catch (ArgumentException e) {
             System.err.println("loadgen: " + e.getMessage());
             System.err.print(ArgParser.USAGE);
@@ -56,6 +58,10 @@ public final class LoadGen {
                 UUID::randomUUID,
                 config.sessions(),
                 config.lateFraction());
+        if (ramp.isPresent()) {
+            runRamp(ramp.get(), config, tokens, new IngestClient(http, config.ingestUrl()), batches);
+            return;
+        }
         Runner runner = new Runner(config, tokens, new IngestClient(http, config.ingestUrl()), batches, MAX_IN_FLIGHT);
         FreshnessScraper scraper = new FreshnessScraper(http, config.freshnessUrl());
 
@@ -80,6 +86,27 @@ public final class LoadGen {
         Optional<BucketHistogram> after = scraper.scrape();
 
         System.out.print(ReportFormatter.format(withFreshness(summary, before, after)));
+    }
+
+    private static void runRamp(
+            RampPlan plan, LoadGenConfig config, TokenProvider tokens, IngestClient ingest, BatchBuilder batches)
+            throws Exception {
+        System.out.printf(
+                "loadgen: saturation search %d -> %d events/s in steps of %d, %d s per step, batch %d -> %s%n",
+                plan.startRate(), plan.ceiling(), plan.step(), plan.stepSeconds(), config.batch(), config.ingestUrl());
+        SaturationReport report = RampRunner.run(plan, (rate, seconds) -> {
+            LoadGenConfig step = new LoadGenConfig(
+                    rate,
+                    seconds,
+                    config.batch(),
+                    config.sessions(),
+                    config.lateFraction(),
+                    config.ingestUrl(),
+                    config.keycloakUrl(),
+                    config.freshnessUrl());
+            return new Runner(step, tokens, ingest, batches, MAX_IN_FLIGHT, false).run();
+        });
+        System.out.print(RampReportFormatter.format(report));
     }
 
     private static RunSummary withFreshness(

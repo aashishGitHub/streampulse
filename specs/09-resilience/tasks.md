@@ -14,11 +14,18 @@ Each line: failing test first, then code. Tick only with passing output pasted i
 
 ## Full-pipeline load test
 
-- [ ] T9-10 `IngestSaturationTest` fails (no rate-ramp mode in loadgen) → `Pacing` gains a ramp
-      mode; `RunSummary` reports the first rate where error rate > 1%, split 429 (quota) vs 503
-      (capacity)
-- [ ] T9-11 `IngestSaturationTest` run for real against the local stack; output pasted into
-      `MILESTONES.md` with hardware spec
+- [x] T9-10 `RampPlanTest`, `SaturationFinderTest`, `RampRunnerTest`, `RampReportFormatterTest`,
+      `ArgParserTest`, `RunnerTest` fail (types and flags absent) → `RampPlan`, `StepResult`,
+      `SaturationFinder`, `SaturationReport`, `RampRunner`, `RampReportFormatter`, `--ramp-to` /
+      `--ramp-step` / `--step-duration`, and a no-backoff `Runner` constructor. Reports the first
+      step whose error rate exceeds 1%, split 429 (quota) vs 503 (capacity), and warns when the
+      client could not offer the asked-for rate. Mutations: backoff flag removed,
+      `>` to `>=`, stop-at-first-breach removed; each went red, restored, green.
+      Spec said `Pacing`/`RunSummary` and `IngestSaturationTest`; separate small classes read
+      better than growing those two, and "memory bound" cannot be asserted from the client (see T9-11)
+- [ ] T9-11 ramp run for real against the local stack; output pasted into `MILESTONES.md` with
+      hardware spec. Also observe, from the ingest JVM's own metrics during the run, that heap and
+      in-flight count stay bounded while 503s rise (REQ-RL-02): loadgen alone cannot see that
 - [ ] T9-12 `EndToEndAccountingIT` fails (no invariant test exists) → a test that sums closed-window
       viewer samples against events sent for one full run and asserts they reconcile within the
       stated window-close delay (closes the Phase 3 "no end-to-end event accounting" gap)

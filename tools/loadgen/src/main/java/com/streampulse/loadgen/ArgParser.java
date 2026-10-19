@@ -4,6 +4,7 @@ package com.streampulse.loadgen;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 public final class ArgParser {
@@ -16,7 +17,10 @@ public final class ArgParser {
             "--late-fraction",
             "--url",
             "--keycloak",
-            "--freshness-url");
+            "--freshness-url",
+            "--ramp-to",
+            "--ramp-step",
+            "--step-duration");
 
     public static final String USAGE =
             """
@@ -29,12 +33,32 @@ public final class ArgParser {
               --url U             ingest base URL                     (default http://localhost:8080)
               --keycloak U        Keycloak base URL                   (default http://localhost:8081)
               --freshness-url U   sink Prometheus endpoint            (default http://localhost:8084/actuator/prometheus)
+            saturation search (replaces the single run; --rate is the first step, ignores Retry-After):
+              --ramp-to N         highest events/s to try; setting it turns the search on
+              --ramp-step N       events/s added per step             (default 500)
+              --step-duration S   seconds per step                    (default 20)
             env: LOADGEN_CLIENT_SECRET (required) is the ingest-gateway client secret.
             """;
 
     private ArgParser() {}
 
     public static LoadGenConfig parse(String[] args) {
+        return config(values(args));
+    }
+
+    public static Optional<RampPlan> parseRamp(String[] args) {
+        Map<String, String> values = values(args);
+        if (!values.containsKey("--ramp-to")) {
+            return Optional.empty();
+        }
+        return Optional.of(new RampPlan(
+                positiveLong(values, "--rate", LoadGenConfig.DEFAULT_RATE),
+                positiveLong(values, "--ramp-step", RampPlan.DEFAULT_STEP),
+                positiveLong(values, "--ramp-to", 0),
+                positiveLong(values, "--step-duration", RampPlan.DEFAULT_STEP_SECONDS)));
+    }
+
+    private static Map<String, String> values(String[] args) {
         Map<String, String> values = new HashMap<>();
         for (int i = 0; i < args.length; i++) {
             String arg = args[i];
@@ -57,7 +81,10 @@ public final class ArgParser {
             }
             values.put(flag, value);
         }
+        return values;
+    }
 
+    private static LoadGenConfig config(Map<String, String> values) {
         long rate = positiveLong(values, "--rate", LoadGenConfig.DEFAULT_RATE);
         long duration = positiveLong(values, "--duration", LoadGenConfig.DEFAULT_DURATION_SECONDS);
         long batch = positiveLong(values, "--batch", LoadGenConfig.DEFAULT_BATCH);

@@ -28,6 +28,7 @@ public final class Runner {
     private final IngestClient ingest;
     private final BatchBuilder batches;
     private final int maxInFlight;
+    private final boolean honourRetryAfter;
 
     private final LongAdder batchesSent = new LongAdder();
     private final LongAdder eventsAccepted = new LongAdder();
@@ -41,11 +42,23 @@ public final class Runner {
 
     public Runner(
             LoadGenConfig config, TokenProvider tokens, IngestClient ingest, BatchBuilder batches, int maxInFlight) {
+        this(config, tokens, ingest, batches, maxInFlight, true);
+    }
+
+    /** A saturation search passes false: obeying Retry-After would lower the offered rate it is measuring. */
+    public Runner(
+            LoadGenConfig config,
+            TokenProvider tokens,
+            IngestClient ingest,
+            BatchBuilder batches,
+            int maxInFlight,
+            boolean honourRetryAfter) {
         this.config = config;
         this.tokens = tokens;
         this.ingest = ingest;
         this.batches = batches;
         this.maxInFlight = maxInFlight;
+        this.honourRetryAfter = honourRetryAfter;
     }
 
     public RunSummary run() throws IOException, InterruptedException {
@@ -134,6 +147,9 @@ public final class Runner {
     }
 
     private void pause(String retryAfterHeader) {
+        if (!honourRetryAfter) {
+            return;
+        }
         long until =
                 System.nanoTime() + Pacing.retryAfterNanos(retryAfterHeader, RETRY_AFTER_FALLBACK, RETRY_AFTER_CAP);
         pausedUntil.accumulateAndGet(until, Math::max);

@@ -63,7 +63,7 @@ no new reporting format.
 
 | Failure | Behaviour | Test that proves it |
 |---|---|---|
-| Ingest rate exceeds capacity | 503s rise, no unbounded queueing | `IngestSaturationTest` (new, loadgen-driven, asserts memory/queue bound while recording the 503 rate) |
+| Ingest rate exceeds capacity | 503s rise, no unbounded queueing | `RampRunnerTest` / `SaturationFinderTest` prove the search finds and names the breach; the bounded-memory half is an observation in T9-11 (ingest JVM metrics), not a unit test |
 | Kafka broker down during ingest | breaker opens, Redis-fallback publish continues | `BrokerDownResilienceIT` (new, toxiproxy) |
 | Postgres down during control-plane write | 503/503-equivalent, no hang, recovers on reconnect | `ControlPlaneDatastoreDownIT` (new, toxiproxy) |
 | Redis down during feed read | per-request failure, no hang | `ActivityFeedDatastoreDownIT` (new, toxiproxy) — extends the existing `reportsA503WhenAStoreIsDown` unit test to a real injected fault |

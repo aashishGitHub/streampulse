@@ -21,6 +21,48 @@ class ArgParserTest {
     }
 
     @Test
+    void noRampFlagMeansNoRampPlan() {
+        assertThat(ArgParser.parseRamp(new String[] {"--rate", "2000"})).isEmpty();
+    }
+
+    @Test
+    void aRampStartsAtRateAndStepsToTheCeiling() {
+        RampPlan plan = ArgParser.parseRamp(new String[] {
+                    "--rate", "1000", "--ramp-to", "4000", "--ramp-step", "500", "--step-duration", "15"
+                })
+                .orElseThrow();
+
+        assertThat(plan.rates()).first().isEqualTo(1000L);
+        assertThat(plan.rates()).last().isEqualTo(4000L);
+        assertThat(plan.step()).isEqualTo(500);
+        assertThat(plan.stepSeconds()).isEqualTo(15);
+    }
+
+    @Test
+    void aRampWithoutAStepOrDurationUsesDocumentedDefaults() {
+        RampPlan plan = ArgParser.parseRamp(new String[] {"--rate", "1000", "--ramp-to", "2000"})
+                .orElseThrow();
+
+        assertThat(plan.step()).isEqualTo(RampPlan.DEFAULT_STEP);
+        assertThat(plan.stepSeconds()).isEqualTo(RampPlan.DEFAULT_STEP_SECONDS);
+    }
+
+    @Test
+    void rampFlagsAreKnownToTheOrdinaryParserSoOneCommandLineServesBoth() {
+        LoadGenConfig config =
+                ArgParser.parse(new String[] {"--rate", "1000", "--ramp-to", "2000", "--step-duration", "10"});
+
+        assertThat(config.rate()).isEqualTo(1000);
+    }
+
+    @Test
+    void aCeilingBelowTheStartingRateIsRejected() {
+        assertThatThrownBy(() -> ArgParser.parseRamp(new String[] {"--rate", "3000", "--ramp-to", "1000"}))
+                .isInstanceOf(ArgumentException.class)
+                .hasMessageContaining("ramp-to");
+    }
+
+    @Test
     void parsesSpaceSeparatedAndEqualsForms() {
         LoadGenConfig config = ArgParser.parse(new String[] {
             "--rate", "2000", "--duration=60", "--batch", "250", "--sessions", "50", "--late-fraction=0.1"

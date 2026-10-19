@@ -75,6 +75,15 @@ class RunnerTest {
         return new Runner(config, tokens, new IngestClient(http, base), batches, 16);
     }
 
+    private Runner runnerThatIgnoresRetryAfter(LoadGenConfig config) {
+        String base = "http://127.0.0.1:" + server.getAddress().getPort();
+        HttpClient http =
+                HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build();
+        TokenProvider tokens = new TokenProvider(Clock.systemUTC(), new KeycloakTokenFetcher(http, base, "s"));
+        BatchBuilder batches = new BatchBuilder(Clock.systemUTC(), new Random(1), UUID::randomUUID, 10, 0);
+        return new Runner(config, tokens, new IngestClient(http, base), batches, 16, false);
+    }
+
     private LoadGenConfig config(long rate, long seconds) {
         String base = "http://127.0.0.1:" + server.getAddress().getPort();
         return new LoadGenConfig(rate, seconds, 50, 10, 0, base, base, base + "/none");
@@ -107,6 +116,18 @@ class RunnerTest {
         assertThat(summary.status202()).isZero();
         assertThat(summary.p50Nanos()).isEmpty();
         assertThat(ingestCalls.get()).isLessThan(24);
+    }
+
+    @Test
+    void keepsOfferingTheRequestedRateWhenToldNotToBackOff() throws Exception {
+        ingestStatus.set(429);
+
+        // 400 events/s in batches of 50 is 8 requests/s, so 2 s asks for about 16. A client that obeyed
+        // Retry-After: 1 would send a handful; a saturation search must not do that.
+        RunSummary summary = runnerThatIgnoresRetryAfter(config(400, 2)).run();
+
+        assertThat(summary.status429()).isGreaterThan(10);
+        assertThat(ingestCalls.get()).isGreaterThan(10);
     }
 
     @Test
