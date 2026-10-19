@@ -1,0 +1,85 @@
+# ============================================================================
+#  control-plane configuration
+# ============================================================================
+
+spring:
+  application:
+    name: control-plane
+
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+
+  # Local-only values, as in docker/compose.yml. Real secrets never live in git.
+  datasource:
+    url: ${POSTGRES_URL:jdbc:postgresql://localhost:5432/streampulse}
+    username: ${POSTGRES_USER:streampulse}
+    password: ${POSTGRES_PASSWORD:streampulse}
+    hikari:
+      # TARGETS until Phase 9 measures them.
+      #
+      # WHY 10: a connection is a Postgres backend process, a few MB each and a scheduling slot. An
+      # admin CRUD service does short transactions; few connections kept busy beat many contending.
+      # The HikariCP pool-sizing note's starting formula is (cores * 2) + effective spindles, which
+      # lands near 10 on a small box (VERIFY against that page before quoting it).
+      #
+      # Virtual threads would let thousands of requests wait, but they all queue on THIS pool, so
+      # the pool, not the thread count, is the concurrency limit. REQUIRES_NEW needs a second
+      # connection per in-flight request: with a pool of 1 it deadlocks against itself.
+      maximum-pool-size: 10
+      # WHY 2: an idle admin service should not hold 10 backends; 2 keeps the first request fast.
+      minimum-idle: 2
+      # WHY 2 s: fail fast under saturation so a caller gets a 503, not a request pile-up.
+      connection-timeout: 2000
+      # WHY 30 min: shorter than any idle-connection cutoff a proxy or the DB might apply, so the
+      # pool retires a connection before something else kills it under a query.
+      max-lifetime: 1800000
+      pool-name: control-plane
+
+  jpa:
+    # WHY false: with open-in-view a lazy collection can be loaded while the view is rendered, which
+    # hides N+1 behind a transaction nobody wrote. Off means a lazy load outside a service throws.
+    open-in-view: false
+    hibernate:
+      # Flyway owns the schema. validate fails the boot on drift between entity and migration.
+      ddl-auto: validate
+    properties:
+      hibernate:
+        default_schema: control_plane
+        jdbc:
+          time_zone: UTC
+
+  flyway:
+    enabled: true
+    schemas: control_plane
+    default-schema: control_plane
+    create-schemas: true
+    # Not baseline-on-migrate: this schema is ours alone, a non-empty one is a surprise worth failing on.
+
+server:
+  port: ${SERVER_PORT:8085}
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: always            # local only
+      group:
+        # livenessState ONLY. Postgres being down is cured by it returning, not by restarting this
+        # process; restarting every pod when the store blips turns a blip into an outage.
+        liveness:
+          include: livenessState
+        readiness:
+          include: readinessState
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+logging:
+  level:
+    com.streampulse: DEBUG

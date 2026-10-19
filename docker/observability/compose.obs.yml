@@ -1,0 +1,64 @@
+# ============================================================================
+#  Observability override (Phase 8): OpenTelemetry Collector, Tempo, Loki, and the wiring that
+#  connects them to the `prometheus` and `grafana` services already in docker/compose.yml.
+#
+#    docker compose -f docker/compose.yml -f docker/observability/compose.obs.yml --profile obs up -d
+#
+#  A SEPARATE file, not an edit of compose.yml: compose merges the files, so this one adds
+#  services and extends two existing ones (volumes, depends_on) without redefining them.
+#
+#  Relative paths below resolve against the FIRST file's directory (docker/), not this file's.
+#
+#  Traces and logs live in the containers' filesystems: `down` loses them.
+# ============================================================================
+
+services:
+  # Every service sends OTLP here: 4317 gRPC, 4318 HTTP. Services run on the host, so both are
+  # published. Config is validated with `otelcol-contrib validate` (see README.md).
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.162.0
+    profiles: [obs]
+    container_name: sp-otel-collector
+    command: ["--config=/etc/otelcol/config.yaml"]
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    volumes:
+      - ./observability/otel/collector.yaml:/etc/otelcol/config.yaml:ro
+    depends_on:
+      - tempo
+      - loki
+
+  tempo:
+    image: grafana/tempo:2.10.8
+    profiles: [obs]
+    container_name: sp-tempo
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    ports:
+      # Loopback only: for `curl` against the trace API. Grafana reaches it over the compose network.
+      - "127.0.0.1:3200:3200"
+    volumes:
+      - ./observability/otel/tempo.yaml:/etc/tempo/tempo.yaml:ro
+
+  loki:
+    image: grafana/loki:3.7.8
+    profiles: [obs]
+    container_name: sp-loki
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    ports:
+      - "127.0.0.1:3100:3100"
+    volumes:
+      - ./observability/otel/loki.yaml:/etc/loki/loki.yaml:ro
+
+  prometheus:
+    volumes:
+      - ./observability/rules:/etc/prometheus/rules:ro
+      - ./observability/scrape.d:/etc/prometheus/scrape.d:ro
+
+  # The Tempo and Loki datasources are provisioned from observability/grafana/provisioning,
+  # already mounted by compose.yml, so only the start-up order is added here.
+  grafana:
+    depends_on:
+      - prometheus
+      - tempo
+      - loki

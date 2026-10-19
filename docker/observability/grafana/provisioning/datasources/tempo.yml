@@ -1,0 +1,24 @@
+apiVersion: 1
+
+datasources:
+  - name: Tempo
+    uid: streampulse-tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    editable: false
+    jsonData:
+      # trace -> logs. Loki holds the trace id as structured metadata, NOT in the log line, so
+      # the default "contains the trace id" line filter would find nothing; the custom query
+      # filters on the field instead. service_name is how Loki names the OTLP service.name.
+      tracesToLogsV2:
+        datasourceUid: streampulse-loki
+        spanStartTimeShift: "-5m"
+        spanEndTimeShift: "5m"
+        tags:
+          - key: service.name
+            value: service_name
+        customQuery: true
+        query: '{$${__tags}} | trace_id="$${__trace.traceId}"'
+      nodeGraph:
+        enabled: true

@@ -1,0 +1,261 @@
+# promtool test rules. Each `tests` entry is its own universe: series from one scenario never
+# leak into another. Counters are written as `start+stepxN`, one sample per minute.
+#
+# Reading the error ratios: ingest 5xx / non-4xx requests; freshness = share of aggregates
+# later than the 28.633115306 s bucket.
+
+rule_files:
+  - ../streampulse-sli.rules.yml
+  - ../streampulse-alerts.rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  # ---------------------------------------------------------------- ingest availability
+  - name: ingest outage at 5 percent 5xx fires every burn-rate alert
+    interval: 1m
+    input_series:
+      - series: 'http_server_requests_seconds_count{job="ingest-gateway",uri="/v1/events:batch",status="202"}'
+        values: '0+570x600'
+      - series: 'http_server_requests_seconds_count{job="ingest-gateway",uri="/v1/events:batch",status="503"}'
+        values: '0+30x600'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: IngestAvailabilityFastBurn
+        exp_alerts:
+          - exp_labels: {severity: page, slo: ingest-availability}
+            exp_annotations:
+              summary: "Ingest is spending 2% of its 30-day error budget per hour"
+              description: "5xx ratio on POST /v1/events:batch over 1h is 5% (target budget 0.1%)."
+              runbook: "docs/runbook.md#ingest-5xx-or-503-spike"
+      - eval_time: 90m
+        alertname: IngestAvailabilitySlowBurn
+        exp_alerts:
+          - exp_labels: {severity: page, slo: ingest-availability}
+            exp_annotations:
+              summary: "Ingest is spending 5% of its 30-day error budget per 6 hours"
+              description: "5xx ratio on POST /v1/events:batch over 6h is 5% (target budget 0.1%)."
+              runbook: "docs/runbook.md#ingest-5xx-or-503-spike"
+      - eval_time: 90m
+        alertname: IngestAvailabilityBudgetLeak
+        exp_alerts:
+          - exp_labels: {severity: ticket, slo: ingest-availability}
+            exp_annotations:
+              summary: "Ingest is on course to exhaust its 30-day error budget"
+              description: "5xx ratio on POST /v1/events:batch over 3d is 5% (target budget 0.1%)."
+              runbook: "docs/runbook.md#ingest-5xx-or-503-spike"
+
+  - name: ingest at 0.05 percent 5xx is inside the budget and fires nothing
+    interval: 1m
+    input_series:
+      - series: 'http_server_requests_seconds_count{job="ingest-gateway",uri="/v1/events:batch",status="202"}'
+        values: '0+999.5x600'
+      - series: 'http_server_requests_seconds_count{job="ingest-gateway",uri="/v1/events:batch",status="503"}'
+        values: '0+0.5x600'
+    alert_rule_test:
+      - {eval_time: 90m, alertname: IngestAvailabilityFastBurn, exp_alerts: []}
+      - {eval_time: 90m, alertname: IngestAvailabilitySlowBurn, exp_alerts: []}
+      - {eval_time: 90m, alertname: IngestAvailabilityBudgetLeak, exp_alerts: []}
+
+  - name: ingest at 0.8 percent 5xx fires the slow burn but not the fast one
+    interval: 1m
+    input_series:
+      - series: 'http_server_requests_seconds_count{job="ingest-gateway",uri="/v1/events:batch",status="202"}'
+        values: '0+992x600'
+      - series: 'http_server_requests_seconds_count{job="ingest-gateway",uri="/v1/events:batch",status="500"}'
+        values: '0+8x600'
+    alert_rule_test:
+      - {eval_time: 90m, alertname: IngestAvailabilityFastBurn, exp_alerts: []}
+      - eval_time: 90m
+        alertname: IngestAvailabilitySlowBurn
+        exp_alerts:
+          - exp_labels: {severity: page, slo: ingest-availability}
+            exp_annotations:
+              summary: "Ingest is spending 5% of its 30-day error budget per 6 hours"
+              description: "5xx ratio on POST /v1/events:batch over 6h is 0.8% (target budget 0.1%)."
+              runbook: "docs/runbook.md#ingest-5xx-or-503-spike"
+
+  - name: ingest at 0.3 percent 5xx opens a ticket but pages nobody
+    interval: 1m
+    input_series:
+      - series: 'http_server_requests_seconds_count{job="ingest-gateway",uri="/v1/events:batch",status="202"}'
+        values: '0+997x600'
+      - series: 'http_server_requests_seconds_count{job="ingest-gateway",uri="/v1/events:batch",status="500"}'
+        values: '0+3x600'
+    alert_rule_test:
+      - {eval_time: 90m, alertname: IngestAvailabilityFastBurn, exp_alerts: []}
+      - {eval_time: 90m, alertname: IngestAvailabilitySlowBurn, exp_alerts: []}
+      - eval_time: 90m
+        alertname: IngestAvailabilityBudgetLeak
+        exp_alerts:
+          - exp_labels: {severity: ticket, slo: ingest-availability}
+            exp_annotations:
+              summary: "Ingest is on course to exhaust its 30-day error budget"
+              description: "5xx ratio on POST /v1/events:batch over 3d is 0.3% (target budget 0.1%)."
+              runbook: "docs/runbook.md#ingest-5xx-or-503-spike"
+
+  - name: a recovered incident stops the page because the short window clears
+    interval: 1m
+    input_series:
+      - series: 'http_server_requests_seconds_count{job="ingest-gateway",uri="/v1/events:batch",status="202"}'
+        values: '0+540x600'
+      # 60 errors a minute for the first 20 minutes (10%), then none.
+      - series: 'http_server_requests_seconds_count{job="ingest-gateway",uri="/v1/events:batch",status="503"}'
+        values: '0+60x20 1200+0x580'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: IngestAvailabilityFastBurn
+        exp_alerts:
+          - exp_labels: {severity: page, slo: ingest-availability}
+            exp_annotations:
+              summary: "Ingest is spending 2% of its 30-day error budget per hour"
+              description: "5xx ratio on POST /v1/events:batch over 1h is 10% (target budget 0.1%)."
+              runbook: "docs/runbook.md#ingest-5xx-or-503-spike"
+      - {eval_time: 40m, alertname: IngestAvailabilityFastBurn, exp_alerts: []}
+
+  - name: client errors are neither bad nor valid, so a flood of 429 cannot dilute real 5xx
+    interval: 1m
+    input_series:
+      - series: 'http_server_requests_seconds_count{job="ingest-gateway",uri="/v1/events:batch",status="202"}'
+        values: '0+99x600'
+      - series: 'http_server_requests_seconds_count{job="ingest-gateway",uri="/v1/events:batch",status="429"}'
+        values: '0+900x600'
+      - series: 'http_server_requests_seconds_count{job="ingest-gateway",uri="/v1/events:batch",status="503"}'
+        values: '0+1x600'
+    alert_rule_test:
+      - {eval_time: 90m, alertname: IngestAvailabilityFastBurn, exp_alerts: []}
+      - eval_time: 90m
+        alertname: IngestAvailabilitySlowBurn
+        exp_alerts:
+          - exp_labels: {severity: page, slo: ingest-availability}
+            exp_annotations:
+              summary: "Ingest is spending 5% of its 30-day error budget per 6 hours"
+              description: "5xx ratio on POST /v1/events:batch over 6h is 1% (target budget 0.1%)."
+              runbook: "docs/runbook.md#ingest-5xx-or-503-spike"
+
+  - name: a gateway that has never returned a 5xx has an error ratio of zero, not no data
+    interval: 1m
+    input_series:
+      - series: 'http_server_requests_seconds_count{job="ingest-gateway",uri="/v1/events:batch",status="202"}'
+        values: '0+100x600'
+    alert_rule_test:
+      - {eval_time: 90m, alertname: IngestAvailabilityFastBurn, exp_alerts: []}
+    promql_expr_test:
+      - expr: sp:ingest_error_ratio:rate5m
+        eval_time: 90m
+        exp_samples:
+          - {labels: 'sp:ingest_error_ratio:rate5m', value: 0}
+
+  # ---------------------------------------------------------------- freshness
+  - name: 20 percent of aggregates late fires every freshness alert
+    interval: 1m
+    input_series:
+      - series: 'streampulse_sink_freshness_seconds_count{job="sink-writer"}'
+        values: '0+1000x600'
+      - series: 'streampulse_sink_freshness_seconds_bucket{job="sink-writer",le="28.633115306"}'
+        values: '0+800x600'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: FreshnessFastBurn
+        exp_alerts:
+          - exp_labels: {severity: page, slo: freshness}
+            exp_annotations:
+              summary: "Aggregates are reaching durable storage late, burning 2% of the budget per hour"
+              description: "Share of aggregates later than ~29 s over 1h is 20% (target budget 1%)."
+              runbook: "docs/runbook.md#lag-spike-or-stale-dashboard"
+      - eval_time: 90m
+        alertname: FreshnessSlowBurn
+        exp_alerts:
+          - exp_labels: {severity: page, slo: freshness}
+            exp_annotations:
+              summary: "Aggregates are reaching durable storage late, burning 5% of the budget per 6 hours"
+              description: "Share of aggregates later than ~29 s over 6h is 20% (target budget 1%)."
+              runbook: "docs/runbook.md#lag-spike-or-stale-dashboard"
+      - eval_time: 90m
+        alertname: FreshnessBudgetLeak
+        exp_alerts:
+          - exp_labels: {severity: ticket, slo: freshness}
+            exp_annotations:
+              summary: "Freshness is on course to exhaust its 30-day error budget"
+              description: "Share of aggregates later than ~29 s over 3d is 20% (target budget 1%)."
+              runbook: "docs/runbook.md#lag-spike-or-stale-dashboard"
+
+  - name: 0.5 percent late is inside the freshness budget and fires nothing
+    interval: 1m
+    input_series:
+      - series: 'streampulse_sink_freshness_seconds_count{job="sink-writer"}'
+        values: '0+1000x600'
+      - series: 'streampulse_sink_freshness_seconds_bucket{job="sink-writer",le="28.633115306"}'
+        values: '0+995x600'
+    alert_rule_test:
+      - {eval_time: 90m, alertname: FreshnessFastBurn, exp_alerts: []}
+      - {eval_time: 90m, alertname: FreshnessSlowBurn, exp_alerts: []}
+      - {eval_time: 90m, alertname: FreshnessBudgetLeak, exp_alerts: []}
+
+  - name: 10 percent late fires the slow burn but not the fast one
+    interval: 1m
+    input_series:
+      - series: 'streampulse_sink_freshness_seconds_count{job="sink-writer"}'
+        values: '0+1000x600'
+      - series: 'streampulse_sink_freshness_seconds_bucket{job="sink-writer",le="28.633115306"}'
+        values: '0+900x600'
+    alert_rule_test:
+      - {eval_time: 90m, alertname: FreshnessFastBurn, exp_alerts: []}
+      - eval_time: 90m
+        alertname: FreshnessSlowBurn
+        exp_alerts:
+          - exp_labels: {severity: page, slo: freshness}
+            exp_annotations:
+              summary: "Aggregates are reaching durable storage late, burning 5% of the budget per 6 hours"
+              description: "Share of aggregates later than ~29 s over 6h is 10% (target budget 1%)."
+              runbook: "docs/runbook.md#lag-spike-or-stale-dashboard"
+
+  - name: 1.5 percent late opens a ticket but pages nobody
+    interval: 1m
+    input_series:
+      - series: 'streampulse_sink_freshness_seconds_count{job="sink-writer"}'
+        values: '0+1000x600'
+      - series: 'streampulse_sink_freshness_seconds_bucket{job="sink-writer",le="28.633115306"}'
+        values: '0+985x600'
+    alert_rule_test:
+      - {eval_time: 90m, alertname: FreshnessFastBurn, exp_alerts: []}
+      - {eval_time: 90m, alertname: FreshnessSlowBurn, exp_alerts: []}
+      - eval_time: 90m
+        alertname: FreshnessBudgetLeak
+        exp_alerts:
+          - exp_labels: {severity: ticket, slo: freshness}
+            exp_annotations:
+              summary: "Freshness is on course to exhaust its 30-day error budget"
+              description: "Share of aggregates later than ~29 s over 3d is 1.5% (target budget 1%)."
+              runbook: "docs/runbook.md#lag-spike-or-stale-dashboard"
+
+  # ---------------------------------------------------------------- consumer lag
+  - name: lag that stays high and keeps rising fires
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumer_fetch_manager_records_lag_max{job="sink-writer",client_id="consumer-sink-writer-1"}'
+        values: '6000+100x120'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: ConsumerLagGrowing
+        exp_alerts:
+          - exp_labels: {severity: ticket, job: sink-writer}
+            exp_annotations:
+              summary: "sink-writer consumer lag is above 5000 records and still rising"
+              runbook: "docs/runbook.md#lag-spike-or-stale-dashboard"
+
+  - name: a large backlog that is draining is recovery, not an incident
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumer_fetch_manager_records_lag_max{job="sink-writer",client_id="consumer-sink-writer-1"}'
+        values: '20000-100x120'
+    alert_rule_test:
+      - {eval_time: 40m, alertname: ConsumerLagGrowing, exp_alerts: []}
+
+  - name: a restoring Kafka Streams consumer is not lag
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumer_fetch_manager_records_lag_max{job="stream-processor",client_id="stream-processor-abc-StreamThread-1-restore-consumer"}'
+        values: '6000+100x120'
+    alert_rule_test:
+      - {eval_time: 40m, alertname: ConsumerLagGrowing, exp_alerts: []}

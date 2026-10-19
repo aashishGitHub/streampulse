@@ -1,0 +1,19 @@
+{
+  "type": "record",
+  "name": "WatchEvent",
+  "namespace": "com.streampulse.contracts.v1",
+  "doc": "A user started watching a title. Published to activity.watch.v1, keyed by userId, and consumed by the activity-feed service to fan the entry out to followers. NOTHING in the telemetry pipeline emits this yet: telemetry events carry only a sessionId, never a user id.",
+
+  "fields": [
+    {"name": "eventId", "type": "string",
+     "doc": "A UUID, the idempotency key. A redelivered event carries the same id, and the feed writes it so that processing it twice changes nothing."},
+
+    {"name": "userId", "type": "string",
+     "doc": "Who is watching. Also the Kafka key, so one user's events stay in order."},
+
+    {"name": "titleId", "type": "string"},
+
+    {"name": "occurredAt", "type": {"type": "long", "logicalType": "timestamp-millis"},
+     "doc": "Event time, assigned where the report is accepted. It becomes the entry's sort score, so a redelivery re-writes the identical score."}
+  ]
+}

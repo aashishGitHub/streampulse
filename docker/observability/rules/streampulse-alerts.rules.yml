@@ -1,0 +1,179 @@
+# Alerts. Two kinds, kept apart on purpose:
+#
+#   streampulse.slo.*    symptom alerts: the user-visible promise is being spent too fast.
+#                        Multiwindow, multi-burn-rate (SRE Workbook, "Alerting on SLOs").
+#   streampulse.cause.*  cause alerts: something specific is broken. They exist so the page
+#                        arrives with a first diagnostic step, not to replace the SLO alerts.
+#
+# Every SLO number is a TARGET until Phase 9 measures it. Budget arithmetic: docs/system-health.md.
+
+groups:
+  - name: streampulse.slo.ingest-availability
+    rules:
+      # Target 99.9% => budget 0.001. A burn rate of N spends the whole budget in (window / N).
+      # Both windows must exceed the threshold: the long one proves it is not a blip, the short
+      # one proves it is still happening, so the alert clears minutes after the problem does.
+      - alert: IngestAvailabilityFastBurn
+        expr: |
+          sp:ingest_error_ratio:rate1h > (14.4 * 0.001)
+          and
+          sp:ingest_error_ratio:rate5m > (14.4 * 0.001)
+        labels:
+          severity: page
+          slo: ingest-availability
+        annotations:
+          summary: "Ingest is spending 2% of its 30-day error budget per hour"
+          description: "5xx ratio on POST /v1/events:batch over 1h is {{ $value | humanizePercentage }} (target budget 0.1%)."
+          runbook: "docs/runbook.md#ingest-5xx-or-503-spike"
+
+      - alert: IngestAvailabilitySlowBurn
+        expr: |
+          sp:ingest_error_ratio:rate6h > (6 * 0.001)
+          and
+          sp:ingest_error_ratio:rate30m > (6 * 0.001)
+        labels:
+          severity: page
+          slo: ingest-availability
+        annotations:
+          summary: "Ingest is spending 5% of its 30-day error budget per 6 hours"
+          description: "5xx ratio on POST /v1/events:batch over 6h is {{ $value | humanizePercentage }} (target budget 0.1%)."
+          runbook: "docs/runbook.md#ingest-5xx-or-503-spike"
+
+      - alert: IngestAvailabilityBudgetLeak
+        expr: |
+          sp:ingest_error_ratio:rate3d > (1 * 0.001)
+          and
+          sp:ingest_error_ratio:rate6h > (1 * 0.001)
+        labels:
+          severity: ticket
+          slo: ingest-availability
+        annotations:
+          summary: "Ingest is on course to exhaust its 30-day error budget"
+          description: "5xx ratio on POST /v1/events:batch over 3d is {{ $value | humanizePercentage }} (target budget 0.1%)."
+          runbook: "docs/runbook.md#ingest-5xx-or-503-spike"
+
+  - name: streampulse.slo.freshness
+    rules:
+      # Target 99% of aggregates durable within 30 s of window end => budget 0.01.
+      - alert: FreshnessFastBurn
+        expr: |
+          sp:freshness_error_ratio:rate1h > (14.4 * 0.01)
+          and
+          sp:freshness_error_ratio:rate5m > (14.4 * 0.01)
+        labels:
+          severity: page
+          slo: freshness
+        annotations:
+          summary: "Aggregates are reaching durable storage late, burning 2% of the budget per hour"
+          description: "Share of aggregates later than ~29 s over 1h is {{ $value | humanizePercentage }} (target budget 1%)."
+          runbook: "docs/runbook.md#lag-spike-or-stale-dashboard"
+
+      - alert: FreshnessSlowBurn
+        expr: |
+          sp:freshness_error_ratio:rate6h > (6 * 0.01)
+          and
+          sp:freshness_error_ratio:rate30m > (6 * 0.01)
+        labels:
+          severity: page
+          slo: freshness
+        annotations:
+          summary: "Aggregates are reaching durable storage late, burning 5% of the budget per 6 hours"
+          description: "Share of aggregates later than ~29 s over 6h is {{ $value | humanizePercentage }} (target budget 1%)."
+          runbook: "docs/runbook.md#lag-spike-or-stale-dashboard"
+
+      - alert: FreshnessBudgetLeak
+        expr: |
+          sp:freshness_error_ratio:rate3d > (1 * 0.01)
+          and
+          sp:freshness_error_ratio:rate6h > (1 * 0.01)
+        labels:
+          severity: ticket
+          slo: freshness
+        annotations:
+          summary: "Freshness is on course to exhaust its 30-day error budget"
+          description: "Share of aggregates later than ~29 s over 3d is {{ $value | humanizePercentage }} (target budget 1%)."
+          runbook: "docs/runbook.md#lag-spike-or-stale-dashboard"
+
+  - name: streampulse.cause
+    rules:
+      # A burn-rate alert cannot fire for a service that exports nothing, because a ratio of
+      # nothing is nothing. This is the one alert that catches a dead process.
+      - alert: StreamPulseTargetDown
+        expr: up{job=~"ingest-gateway|stream-processor|sink-writer|query-api"} == 0
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.job }} is not being scraped"
+          runbook: "docs/runbook.md#processor-crash-or-restart"
+
+      - alert: ConsumerLagGrowing
+        # Sustained (never under the floor for 10 min) AND still rising. A big but shrinking
+        # backlog after a restart is recovery, not an incident. 5000 records is a target, not
+        # a measured number.
+        expr: |
+          min_over_time(sp:consumer_lag_records:max[10m]) > 5000
+          and
+          deriv(sp:consumer_lag_records:max[10m]) > 0
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $labels.job }} consumer lag is above 5000 records and still rising"
+          runbook: "docs/runbook.md#lag-spike-or-stale-dashboard"
+
+      - alert: SinkWritesFailing
+        expr: rate(streampulse_sink_batch_flush_failures_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "sink-writer cannot write to the durable store"
+          runbook: "docs/runbook.md#postgres-slow-or-down"
+
+      - alert: SinkBatchQueueNearFull
+        # 1600 = 80% of streampulse.sink.batch.queue-capacity (2000 in the sink-writer's
+        # application.yml). Change both together.
+        expr: max(streampulse_sink_batch_queue_depth_records) > 1600
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "sink-writer batch buffer is above 80% full"
+          runbook: "docs/runbook.md#postgres-slow-or-down"
+
+      - alert: SinkDeadLetters
+        # Records are validated before they reach the sink, so a dead letter here is a bug or a
+        # schema problem, not routine bad data.
+        expr: increase(streampulse_sink_dead_letters_records_total[15m]) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "sink-writer parked records on the dead-letter topic"
+          runbook: "docs/runbook.md#dead-letter-growth"
+
+      - alert: ProcessorRejectRatioHigh
+        expr: sp:processor_reject_ratio:rate15m > 0.01
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "More than 1% of ingested events are being dead-lettered by the processor"
+          runbook: "docs/runbook.md#dead-letter-growth"
+
+      - alert: IdempotencyStoreUnavailable
+        # Ingest fails OPEN (ADR-0007): events are still accepted, but duplicates are unprotected.
+        expr: increase(streampulse_ingest_idempotency_unavailable_total[5m]) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Ingest could not reach the dedup store and published without deduplication"
+          runbook: "docs/runbook.md#redis-outage"
+
+      - alert: RedisProjectionFailing
+        expr: increase(streampulse_sink_projection_failures_total[10m]) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "sink-writer stored batches in Postgres but could not update Redis"
+          runbook: "docs/runbook.md#redis-outage"

@@ -1,0 +1,125 @@
+openapi: 3.1.0
+info:
+  title: StreamPulse Alert Engine
+  version: 1.0.0
+  description: |
+    The read side of the alert engine: the alerts that are active now, and a live stream of every
+    change. Alerts are produced by evaluating rules against windowed aggregates; see
+    specs/06-alert-engine.
+
+    An alert goes through FIRING, SUPPRESSED and RESOLVED. SUPPRESSED means its condition holds but an
+    upstream root cause is already firing; `suppressedBy` is that alert's id.
+
+    Authentication is NOT enforced yet: `tenantId` is a filter the caller asserts, not an
+    authorisation. This is a known gap, not a design.
+
+    The `alertId` is stable for the whole life of an incident (firing, suppressed, resolved) and
+    is derived deterministically, so a consumer can de-duplicate on `alertId` + `state`.
+servers:
+  - url: http://localhost:8086
+paths:
+  /v1/alerts:
+    get:
+      operationId: listActiveAlerts
+      summary: Active alerts of one tenant
+      description: |
+        FIRING and SUPPRESSED alerts, oldest first. RESOLVED alerts are not listed: they are
+        delivered once on the stream, and a resolved alert is no longer active.
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+      responses:
+        '200':
+          description: The active alerts, possibly none
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Alert' }
+        '400':
+          description: '`tenantId` is missing or malformed'
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/ProblemDetail' } } }
+        '500':
+          description: Unexpected failure
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/ProblemDetail' } } }
+
+  /v1/alerts/stream:
+    get:
+      operationId: streamAlerts
+      summary: Alert changes of one tenant (Server-Sent Events)
+      description: |
+        `text/event-stream`. Each change is one event:
+
+        ```
+        id: 42
+        event: alert
+        data: {"alertId":"...","tenantId":"...", ...}
+        ```
+
+        - `id` is a sequence number that increases strictly within ONE server instance. It restarts
+          when the instance restarts: an id that goes backwards means the client should re-read
+          `GET /v1/alerts`.
+        - A comment line (`:heartbeat`) is sent every 15 s while idle, which keeps proxies from
+          closing the connection and lets the server notice a client that has gone.
+        - On reconnect the browser sends `Last-Event-ID`. The retained events after it are replayed
+          in order before live ones, with no gap and no duplicate. Replay is a bounded buffer across all
+          tenants (1000 events, a target): after a long outage, or a busy period, read
+          `GET /v1/alerts` to resynchronise.
+        - A client that falls too far behind has its stream ended; reconnecting with `Last-Event-ID`
+          resumes it.
+        - A stream ends after a bounded lifetime (30 minutes, a target). EventSource reconnects by itself.
+      parameters:
+        - $ref: '#/components/parameters/TenantId'
+        - name: Last-Event-ID
+          in: header
+          required: false
+          schema: { type: string }
+          description: Sent by the browser on reconnect. A value that is not a non-negative integer is ignored.
+      responses:
+        '200':
+          description: An open event stream. The data of each `alert` event is an `Alert`.
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '400':
+          description: '`tenantId` is missing or malformed'
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/ProblemDetail' } } }
+        '500':
+          description: Unexpected failure
+          content: { application/problem+json: { schema: { $ref: '#/components/schemas/ProblemDetail' } } }
+
+components:
+  parameters:
+    TenantId:
+      name: tenantId
+      in: query
+      required: true
+      schema:
+        type: string
+        pattern: '^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$'
+      description: Must match the control plane's tenant id format.
+  schemas:
+    Alert:
+      type: object
+      required: [alertId, tenantId, ruleId, series, state, severity, summary, firedAt, resolvedAt, suppressedBy]
+      properties:
+        alertId: { type: string, description: Stable for the whole incident. }
+        tenantId: { type: string }
+        ruleId: { type: string }
+        series:
+          type: string
+          description: '`titleId:region:metric`, with `*` where the aggregate spans all titles or regions.'
+          examples: ['title-1:us-east-1:ERROR_RATE', '*:*:CONCURRENT_VIEWERS']
+        state: { type: string, enum: [FIRING, RESOLVED, SUPPRESSED] }
+        severity: { type: string, enum: [INFO, WARNING, CRITICAL] }
+        summary: { type: string }
+        firedAt: { type: string, format: date-time, description: When the incident began (first breach). }
+        resolvedAt: { type: [string, 'null'], format: date-time, description: Set only when state is RESOLVED. }
+        suppressedBy: { type: [string, 'null'], description: The `alertId` of the upstream root cause. Set only when state is SUPPRESSED. }
+    ProblemDetail:
+      type: object
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        traceId: { type: string }

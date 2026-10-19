@@ -1,0 +1,97 @@
+# Recording rules: the SLIs. Everything the burn-rate alerts and the SLO dashboard read is
+# computed here once, so a panel and an alert can never disagree about what "error ratio" means.
+#
+# Naming: sp:<sli>:<operation><window>. Every SLI is an ERROR ratio (bad / valid), because the
+# burn-rate alerts compare it with a multiple of the error budget.
+#
+# The windows are the ones the SRE Workbook's multiwindow table needs: 5m/1h, 30m/6h, 6h/3d.
+# SLO targets are TARGETS until Phase 9 measures them (see docs/system-health.md).
+
+groups:
+  - name: streampulse.sli.ingest
+    rules:
+      # valid = every request except 4xx. A 4xx is the client's mistake or its quota (429); the
+      # gateway answered correctly. 5xx includes 503 (our capacity), which IS our failure.
+      # `or vector(0)` keeps the ratio at 0 when no 5xx series exists yet instead of
+      # disappearing, which is what a healthy gateway looks like.
+      - record: sp:ingest_error_ratio:rate5m
+        expr: |
+          (sum(rate(http_server_requests_seconds_count{job="ingest-gateway",uri="/v1/events:batch",status=~"5.."}[5m])) or vector(0))
+          / sum(rate(http_server_requests_seconds_count{job="ingest-gateway",uri="/v1/events:batch",status!~"4.."}[5m]))
+      - record: sp:ingest_error_ratio:rate30m
+        expr: |
+          (sum(rate(http_server_requests_seconds_count{job="ingest-gateway",uri="/v1/events:batch",status=~"5.."}[30m])) or vector(0))
+          / sum(rate(http_server_requests_seconds_count{job="ingest-gateway",uri="/v1/events:batch",status!~"4.."}[30m]))
+      - record: sp:ingest_error_ratio:rate1h
+        expr: |
+          (sum(rate(http_server_requests_seconds_count{job="ingest-gateway",uri="/v1/events:batch",status=~"5.."}[1h])) or vector(0))
+          / sum(rate(http_server_requests_seconds_count{job="ingest-gateway",uri="/v1/events:batch",status!~"4.."}[1h]))
+      - record: sp:ingest_error_ratio:rate6h
+        expr: |
+          (sum(rate(http_server_requests_seconds_count{job="ingest-gateway",uri="/v1/events:batch",status=~"5.."}[6h])) or vector(0))
+          / sum(rate(http_server_requests_seconds_count{job="ingest-gateway",uri="/v1/events:batch",status!~"4.."}[6h]))
+      - record: sp:ingest_error_ratio:rate3d
+        expr: |
+          (sum(rate(http_server_requests_seconds_count{job="ingest-gateway",uri="/v1/events:batch",status=~"5.."}[3d])) or vector(0))
+          / sum(rate(http_server_requests_seconds_count{job="ingest-gateway",uri="/v1/events:batch",status!~"4.."}[3d]))
+
+      - record: sp:ingest_latency_p99:rate5m
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le) (rate(http_server_requests_seconds_bucket{job="ingest-gateway",uri="/v1/events:batch"}[5m])))
+
+  - name: streampulse.sli.freshness
+    rules:
+      # "Within 30 s" cannot be read off the histogram exactly: Micrometer's buckets for this timer
+      # (1 s to 10 min) have no 30.0 boundary, only 28.633115306 and 34.359738367. The lower one is
+      # used, so the SLI is slightly STRICTER than the SLO: a write at 29 s counts as bad.
+      # VERIFY the boundary again after any Micrometer upgrade; if it moves, this rule goes quiet.
+      - record: sp:freshness_error_ratio:rate5m
+        expr: |
+          1 - (
+            sum(rate(streampulse_sink_freshness_seconds_bucket{job="sink-writer",le="28.633115306"}[5m]))
+            / sum(rate(streampulse_sink_freshness_seconds_count{job="sink-writer"}[5m]))
+          )
+      - record: sp:freshness_error_ratio:rate30m
+        expr: |
+          1 - (
+            sum(rate(streampulse_sink_freshness_seconds_bucket{job="sink-writer",le="28.633115306"}[30m]))
+            / sum(rate(streampulse_sink_freshness_seconds_count{job="sink-writer"}[30m]))
+          )
+      - record: sp:freshness_error_ratio:rate1h
+        expr: |
+          1 - (
+            sum(rate(streampulse_sink_freshness_seconds_bucket{job="sink-writer",le="28.633115306"}[1h]))
+            / sum(rate(streampulse_sink_freshness_seconds_count{job="sink-writer"}[1h]))
+          )
+      - record: sp:freshness_error_ratio:rate6h
+        expr: |
+          1 - (
+            sum(rate(streampulse_sink_freshness_seconds_bucket{job="sink-writer",le="28.633115306"}[6h]))
+            / sum(rate(streampulse_sink_freshness_seconds_count{job="sink-writer"}[6h]))
+          )
+      - record: sp:freshness_error_ratio:rate3d
+        expr: |
+          1 - (
+            sum(rate(streampulse_sink_freshness_seconds_bucket{job="sink-writer",le="28.633115306"}[3d]))
+            / sum(rate(streampulse_sink_freshness_seconds_count{job="sink-writer"}[3d]))
+          )
+
+      - record: sp:freshness_p99_seconds:rate5m
+        expr: |
+          histogram_quantile(0.99, sum by (le) (rate(streampulse_sink_freshness_seconds_bucket{job="sink-writer"}[5m])))
+
+  - name: streampulse.sli.pipeline
+    rules:
+      # Largest per-partition backlog seen by any consumer thread of the job. The restore consumer
+      # of Kafka Streams replays changelogs after a restart and is not "falling behind".
+      # kafka_consumer_fetch_manager_records_lag_max measures against the fetch position, not the
+      # committed offset, so records fetched but not yet acknowledged do not count as lag.
+      - record: sp:consumer_lag_records:max
+        expr: |
+          max by (job) (kafka_consumer_fetch_manager_records_lag_max{job=~"sink-writer|stream-processor",client_id!~".*restore-consumer.*"})
+
+      - record: sp:processor_reject_ratio:rate15m
+        expr: |
+          sum(rate(streampulse_processor_events_rejected_events_total[15m]))
+          / sum(rate(streampulse_ingest_events_published_events_total[15m]))

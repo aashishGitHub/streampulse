@@ -1,0 +1,120 @@
+# ============================================================================
+#  activity-feed configuration
+# ============================================================================
+
+spring:
+  application:
+    name: activity-feed
+
+  threads:
+    virtual:
+      # Every call blocks on Postgres, Redis or Kafka; a blocked virtual thread unmounts. ADR-0006.
+      enabled: true
+
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+
+  # Local-only values, as in docker/compose.yml. Real secrets never live in git.
+  datasource:
+    url: ${POSTGRES_URL:jdbc:postgresql://localhost:5432/streampulse}
+    username: ${POSTGRES_USER:streampulse}
+    password: ${POSTGRES_PASSWORD:streampulse}
+    hikari:
+      connection-timeout: 2000
+
+  flyway:
+    enabled: true
+    # Own schema: `public` already holds sink-writer's table and Flyway refuses a non-empty
+    # schema with no history. The SQL names the schema explicitly, so no search_path is assumed.
+    schemas: activity_feed
+    default-schema: activity_feed
+    create-schemas: true
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      timeout: 2s
+      connect-timeout: 2s
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP:localhost:9092}
+    consumer:
+      group-id: activity-feed
+      # The offset is committed by the listener, after the fan-out is durable, never on a timer.
+      enable-auto-commit: false
+      auto-offset-reset: earliest
+      max-poll-records: 500
+      isolation-level: read_committed
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.ByteArrayDeserializer
+      properties:
+        partition.assignment.strategy: org.apache.kafka.clients.consumer.CooperativeStickyAssignor
+        # A poll of 500 fan-outs plus the longest redelivery backoff must fit, or the broker
+        # evicts the consumer in the middle of a Redis outage.
+        max.poll.interval.ms: 300000
+    listener:
+      type: batch
+      ack-mode: manual
+      concurrency: 3
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.ByteArraySerializer
+      acks: all
+
+server:
+  port: ${SERVER_PORT:8087}
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: always            # local only
+      group:
+        # livenessState ONLY: a store being down is cured by it returning, not by a restart.
+        liveness:
+          include: livenessState
+        readiness:
+          include: readinessState
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+streampulse:
+  feed:
+    watch-topic: activity.watch.v1
+    watch-dlt-topic: activity.watch.v1.dlt
+    # TARGETS until Phase 9 measures them; see docs/feed-design.md for the arithmetic.
+    celebrity-threshold: 10000
+    # Dev-only signing key for page cursors. A real deployment injects its own.
+    cursor-secret: ${FEED_CURSOR_SECRET:local-dev-only-cursor-signing-key-change-me}
+    publish-timeout: 3s
+    dlt-send-timeout: 10s
+    follower-page-size: 500
+    timeline:
+      max-length: 200
+      ttl: 7d
+    outbox:
+      max-length: 1000
+      ttl: 7d
+    read:
+      timeline-window: 200
+      celebrity-window: 50
+      max-celebrities: 100
+      max-followees: 5000
+    ranking:
+      half-life: 30m
+    retry:
+      initial-interval: 1s
+      multiplier: 2.0
+      max-interval: 30s
+
+logging:
+  level:
+    com.streampulse: DEBUG

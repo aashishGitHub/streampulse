@@ -1,0 +1,106 @@
+# ============================================================================
+#  alert-engine configuration
+# ============================================================================
+
+spring:
+  application:
+    name: alert-engine
+
+  threads:
+    virtual:
+      # Request threads and SSE writers are virtual threads; the evaluation path is in-memory
+      # and the Kafka consumer is a platform thread. ADR-0017 for MVC over WebFlux.
+      enabled: true
+
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+
+  mvc:
+    problemdetails:
+      enabled: true
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP:localhost:9092}
+    consumer:
+      group-id: alert-engine
+      # The offset is acknowledged by the listener after the state update and the deliveries.
+      enable-auto-commit: false
+      # A NEW group starts at the end: replaying retained history through the rules would fire and
+      # resolve a backlog of long-finished incidents. An existing group resumes from its offset.
+      auto-offset-reset: latest
+      # Skip records of aborted producer transactions (the stream processor is exactly-once v2).
+      isolation-level: read_committed
+      max-poll-records: 100
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.ByteArrayDeserializer
+    listener:
+      ack-mode: manual
+      # The engine is single-writer behind one lock; more threads add nothing.
+      concurrency: 1
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.ByteArraySerializer
+      acks: all
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+
+server:
+  port: ${SERVER_PORT:8086}
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: always            # local only
+      group:
+        # livenessState ONLY. Kafka or SQS being down is cured by them returning, not by restarting
+        # this process; restarting every pod when a broker blips turns a blip into an outage.
+        liveness:
+          include: livenessState
+        readiness:
+          include: readinessState
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+streampulse:
+  aws:
+    # moto from docker/compose.yml. Remove for a real account: the SDK then resolves endpoint and
+    # credentials itself. Local simulation proves API-level behaviour only (ADR-0003).
+    endpoint-override: ${AWS_ENDPOINT:http://localhost:5001}
+    region: us-east-1
+    alerts-queue-name: alerts
+    sqs-enabled: true
+
+  alerts:
+    aggregate-topic: telemetry.agg.v1
+    config-topic: config.changes.v1
+    alerts-topic: alerts.v1
+    # Targets until Phase 9 measures them. Must be at least the stream processor's grace
+    # (5 s): before that a window may still be on its way.
+    absence-grace: 5s
+    sweep-interval: 10s
+    delivery-timeout: 10s
+    sse:
+      heartbeat: 15s
+      replay-buffer: 1000
+      subscriber-buffer: 256
+      max-lifetime: 30m
+    rulebook:
+      enabled: true
+      poll-timeout: 500ms
+    # The React dashboard's dev server. Add the deployed origin per environment.
+    cors-allowed-origins:
+      - http://localhost:5173
+      - http://localhost:3000
+
+logging:
+  level:
+    com.streampulse: DEBUG

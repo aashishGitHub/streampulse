@@ -1,0 +1,375 @@
+:root {
+  --bg: #ffffff;
+  --surface: #f5f7fa;
+  --text: #1a2230;
+  --muted: #4a5568;
+  --border: #b7c0cc;
+  --accent: #0b5cad;
+  --accent-contrast: #ffffff;
+  --danger: #9b1c1c;
+  --danger-bg: #fdecec;
+  --warn: #7a4b00;
+  --ok: #1d6b3a;
+  --focus: #b45309;
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font: 16px/1.5 system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.skip-link {
+  position: absolute;
+  left: 8px;
+  top: -48px;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  padding: 8px 12px;
+  z-index: 10;
+}
+.skip-link:focus {
+  top: 8px;
+}
+
+.app-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.app-header h1 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+.auth {
+  margin-left: auto;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+nav .nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  list-style: none;
+  margin: 0;
+  padding: 8px 16px 0;
+  border-bottom: 1px solid var(--border);
+}
+nav a {
+  display: block;
+  padding: 8px 14px;
+  color: var(--accent);
+  text-decoration: none;
+  border: 1px solid transparent;
+  border-bottom: none;
+}
+nav a[aria-current='page'] {
+  color: var(--text);
+  font-weight: 600;
+  border-color: var(--border);
+  background: var(--bg);
+  margin-bottom: -1px;
+  border-bottom: 3px solid var(--accent);
+}
+
+main {
+  padding: 16px;
+  max-width: 1200px;
+}
+main:focus {
+  outline: none;
+}
+
+button,
+select,
+input {
+  font: inherit;
+}
+button {
+  background: var(--accent);
+  color: var(--accent-contrast);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 6px 14px;
+  cursor: pointer;
+}
+button:disabled {
+  background: var(--muted);
+  border-color: var(--muted);
+  cursor: progress;
+}
+select,
+input:not([type='checkbox']) {
+  border: 1px solid var(--muted);
+  border-radius: 4px;
+  padding: 5px 8px;
+  background: var(--bg);
+  color: var(--text);
+}
+[aria-invalid='true'] {
+  border-color: var(--danger);
+  border-width: 2px;
+}
+
+.note,
+.empty,
+.chart-where {
+  color: var(--muted);
+}
+
+.connection {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.connection-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.connection-open .connection-dot {
+  background: var(--ok);
+}
+.connection-retrying .connection-dot {
+  background: var(--warn);
+  border-radius: 2px;
+}
+.connection-closed .connection-dot {
+  background: var(--danger);
+  border-radius: 0;
+}
+
+.problem {
+  border: 2px solid var(--danger);
+  background: var(--danger-bg);
+  color: var(--danger);
+  padding: 8px 12px;
+  border-radius: 4px;
+  margin: 8px 0;
+}
+.problem h3,
+.problem p {
+  margin: 4px 0;
+}
+.success {
+  color: var(--ok);
+  font-weight: 600;
+}
+
+.chart-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+}
+.chart {
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.chart figcaption {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.chart-title {
+  font-weight: 600;
+}
+.chart-latest {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+.chart svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+.chart-line {
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+.chart-dot {
+  fill: var(--accent);
+}
+.chart-axis {
+  stroke: var(--border);
+}
+.chart table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+.chart th,
+.chart td {
+  text-align: left;
+  padding: 2px 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.alert-list {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+.alert {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-left-width: 8px;
+}
+.alert p {
+  margin: 2px 0;
+}
+.alert-firing {
+  border-left-style: solid;
+  border-color: var(--danger);
+}
+.alert-suppressed {
+  border-left-style: dashed;
+  border-color: var(--warn);
+}
+.alert-resolved {
+  border-left-style: dotted;
+  border-color: var(--ok);
+}
+.badge {
+  font-weight: 700;
+  margin-right: 12px;
+}
+.alert-firing .badge {
+  color: var(--danger);
+}
+.alert-suppressed .badge {
+  color: var(--warn);
+}
+.alert-resolved .badge {
+  color: var(--ok);
+}
+.alert-meta {
+  color: var(--muted);
+}
+
+.rule-form {
+  max-width: 520px;
+  display: grid;
+  gap: 12px;
+}
+.field {
+  display: grid;
+  gap: 4px;
+}
+.field-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.field-error {
+  margin: 0;
+  color: var(--danger);
+  font-weight: 600;
+}
+fieldset {
+  border: 1px solid var(--border);
+}
+.check {
+  display: inline-block;
+  margin-right: 14px;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+button.secondary {
+  background: var(--bg);
+  color: var(--accent);
+}
+button.danger {
+  background: var(--danger);
+  border-color: var(--danger);
+}
+.rules {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 12px 0;
+}
+.rules caption {
+  text-align: left;
+  font-weight: 600;
+  padding-bottom: 4px;
+}
+.rules th,
+.rules td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.row-actions {
+  display: flex;
+  gap: 6px;
+}
+.panel {
+  margin-top: 16px;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  max-width: 560px;
+}
+.panel h3:focus {
+  outline: none;
+}
+.details {
+  display: grid;
+  gap: 4px;
+}
+.details div {
+  display: flex;
+  gap: 12px;
+}
+.details dt {
+  min-width: 110px;
+  color: var(--muted);
+}
+.details dd {
+  margin: 0;
+}
+.confirm {
+  margin: 12px 0;
+  padding: 8px 12px;
+  border: 2px solid var(--danger);
+  border-radius: 4px;
+  max-width: 420px;
+}

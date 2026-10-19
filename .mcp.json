@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "streampulse": {
+      "type": "stdio",
+      "command": "java",
+      "args": ["-jar", "${CLAUDE_PROJECT_DIR:-.}/services/mcp-server/build/libs/mcp-server.jar"],
+      "env": {
+        "STREAMPULSE_MCP_QUERYAPI_BASEURL": "${STREAMPULSE_QUERY_API_URL:-http://localhost:8082}",
+        "STREAMPULSE_MCP_ALERTENGINE_BASEURL": "${STREAMPULSE_ALERT_ENGINE_URL:-http://localhost:8086}"
+      }
+    }
+  }
+}

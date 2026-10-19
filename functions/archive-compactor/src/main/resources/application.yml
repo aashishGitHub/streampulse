@@ -1,0 +1,15 @@
+spring:
+  application:
+    name: archive-compactor
+  main:
+    web-application-type: none
+  cloud:
+    function:
+      definition: compactArchive
+
+compactor:
+  bucket: ${ARCHIVE_BUCKET:streampulse-raw-archive-local}
+  quiet-period: ${COMPACTOR_QUIET_PERIOD:PT15M}
+  min-input-objects: 2
+  region: ${AWS_REGION:us-east-1}
+  endpoint-override: ${AWS_ENDPOINT_OVERRIDE:}

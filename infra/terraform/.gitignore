@@ -1,0 +1,21 @@
+# Downloaded providers and module caches: reproducible from the lock file.
+**/.terraform/
+
+# State can hold secrets and is local to whoever ran apply. Never commit it.
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfplan
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# The dependency lock file IS committed, for the two root configurations (envs/*): it pins the
+# exact provider build and its hashes. Modules are not roots, so the lock files that
+# `terraform init` also writes inside them are noise.
+modules/**/.terraform.lock.hcl
+
+# Optional local provider cache (export TF_PLUGIN_CACHE_DIR=$PWD/.terraform-plugin-cache) so init downloads once.
+.terraform-plugin-cache/

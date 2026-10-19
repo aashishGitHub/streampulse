@@ -1,0 +1,3 @@
+# The agent jar is downloaded by fetch-agent.sh and never committed.
+*.jar
+.download.*

@@ -1,0 +1,36 @@
+{
+  "name": "control-plane-outbox",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "tasks.max": "1",
+
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "streampulse",
+    "database.password": "streampulse",
+    "database.dbname": "streampulse",
+    "topic.prefix": "sp",
+
+    "plugin.name": "pgoutput",
+    "slot.name": "control_plane_outbox",
+    "publication.name": "control_plane_outbox_pub",
+    "publication.autocreate.mode": "filtered",
+    "table.include.list": "control_plane.outbox",
+
+    "tombstones.on.delete": "false",
+
+    "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+    "value.converter": "org.apache.kafka.connect.converters.ByteArrayConverter",
+
+    "transforms": "outbox",
+    "transforms.outbox.type": "io.debezium.transforms.outbox.EventRouter",
+    "transforms.outbox.table.field.event.id": "id",
+    "transforms.outbox.table.field.event.key": "aggregate_id",
+    "transforms.outbox.table.field.event.payload": "payload",
+    "transforms.outbox.route.by.field": "aggregate_type",
+    "transforms.outbox.route.topic.regex": ".*",
+    "transforms.outbox.route.topic.replacement": "config.changes.v1",
+    "transforms.outbox.route.tombstone.on.empty.payload": "true",
+    "transforms.outbox.table.fields.additional.placement": "operation:header:operation,aggregate_type:header:entityKind"
+  }
+}
