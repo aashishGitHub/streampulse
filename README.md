@@ -122,14 +122,14 @@ code**, so "done" is a fact rather than an opinion.
 | **3** | Stream processing (Kafka Streams, windowing, exactly-once) | ✅ done (ADR-0012) |
 | **4** | Sinks & storage: sink-writer, batch writer, Postgres + Redis, DLT (DynamoDB/S3 not built) | ✅ done |
 | **5** | Query API + live SSE (no auth) | ✅ done |
-| 6 | Control plane, Debezium CDC, alert engine | ⬜ |
-| 7 | React dashboard | ⬜ |
+| 6 | Control plane, Debezium CDC, alert engine | ✅ core complete (no alert-state restore on restart) |
+| 7 | React dashboard | ✅ core complete (tests only; never run against real backends) |
 | 8 | Observability, SLOs, error budgets | ⬜ |
-| 9 | Resilience, load testing, JVM profiling | ⬜ |
-| 10 | AWS simulation & Terraform | ⬜ |
+| 9 | Resilience, load testing, JVM profiling | ⬜ (spec in progress) |
+| 10 | AWS simulation & Terraform (archive compactor + IaC) | ✅ core complete (`msk`/`vpc`/`eks` validate-only) |
 | 11 | Containers & Kubernetes | ⬜ |
-| 12 | Activity feed (the Twitter-style design, implemented) | ⬜ |
-| 13 | MCP server / AI tooling | ⬜ |
+| 12 | Activity feed (the Twitter-style design, implemented) | ✅ core complete (mutation checks unverified) |
+| 13 | MCP server / AI tooling | ✅ core complete |
 | 14 | Interview packaging | ⬜ |
 
 ---

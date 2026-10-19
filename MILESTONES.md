@@ -1418,3 +1418,276 @@ metadata and latest values; a request with no `tenantId` returned 400; the SSE e
   per-tenant quota only). Not changed.
 - Query-api has no authentication. Single broker, replication factor 1. No outbox, no schema
   registry, no Kubernetes.
+
+---
+
+## Phase 10 — AWS simulation & Terraform (archive compactor + IaC) · 2026-10-19 · ✅ core complete
+
+Code and specs (`specs/10-aws-terraform/`, ADR-0019, ADR-0020) were already in the tree from an
+earlier session; this entry is the close-out that was skipped — rerunning every proof and
+pasting real output, per the process in `CLAUDE.md`.
+
+**Archive compactor** — `./gradlew :functions:archive-compactor:test :functions:archive-compactor:integrationTest`,
+all green, 0 failures / 0 skipped:
+
+```
+CompactorFunctionWiringTest        tests=2  failures=0  skipped=0
+CompactorArchitectureRulesTest     tests=4  failures=0  skipped=0
+CompactArchiveFunctionTest         tests=4  failures=0  skipped=0
+S3ArchiveStoreTest                 tests=3  failures=0  skipped=0
+NdjsonMergerTest                   tests=8  failures=0  skipped=0
+ArchiveKeyTest                     tests=13 failures=0  skipped=0
+CompactionPlannerTest              tests=12 failures=0  skipped=0
+CompactorTest                      tests=16 failures=0  skipped=0
+ArchiveCompactionIT (integration)  tests=5  failures=0  skipped=0
+S3ArchiveStoreIT (integration)     tests=6  failures=0  skipped=0
+```
+
+**Terraform** — `make tf-validate`: `terraform fmt -check -recursive` clean, `validate` succeeds
+for every module (`kinesis`, `dynamodb`, `s3`, `sqs`, `iam`, `msk`, `vpc`, `eks`) and both envs.
+
+Against a freshly started moto (`docker compose --profile core up -d moto`, host port 5001),
+`envs/local`:
+
+```
+$ terraform plan
+Plan: 13 to add, 0 to change, 0 to destroy.
+
+$ terraform apply tfplan.local
+Apply complete! Resources: 13 added, 0 changed, 0 destroyed.
+```
+
+Read back with the AWS CLI against moto: Kinesis stream `telemetry-raw-v1` ACTIVE with 2 shards;
+SQS queues `alerts` and `alerts-dlq`, with `alerts`' `RedrivePolicy` confirmed as
+`{"deadLetterTargetArn": "...alerts-dlq", "maxReceiveCount": 5}`; S3 bucket
+`streampulse-raw-archive-local`; DynamoDB table `streampulse-aggregate-history`; 6 IAM policies
+(`streampulse-ingest-gateway`, `-alerts-producer`, `-alerts-consumer`, `-archive-compactor`,
+`-history-writer`, `-history-reader`).
+
+Second `plan` (no `-out`, no reapply) reproduces the documented emulator drift exactly:
+
+```
+Plan: 0 to add, 3 to change, 0 to destroy.
+```
+— tags on the queue and a whitespace-only `redrive_policy` re-serialization on `alerts`; both are
+moto re-encoding what it already stored, not real drift.
+
+`terraform destroy`: `Destroy complete! Resources: 13 destroyed.` AWS CLI confirms every
+Kinesis/SQS/S3/DynamoDB/IAM listing back to empty.
+
+### Honest gaps (unchanged from `specs/10-aws-terraform/tasks.md`)
+
+- `msk`, `vpc`, `eks` are validate-only: never planned or applied against anything, moto or real.
+- DynamoDB Local (vs moto) still cannot be used with provider 6.68.0 — `apply` never returns;
+  cause unproven. The table above was created against moto, not DynamoDB Local.
+- Point-in-time recovery on the DynamoDB table is untested; the block is off locally.
+- No service actually writes to the raw archive bucket or the aggregate-history table — both
+  modules describe a target, not a wired producer.
+- The compactor is not deployed as a real serverless function; it runs in-process, in tests only.
+- Memory-boundedness of the compactor (streaming in, streaming out) is by construction, not
+  measured under load.
+- `make tf-validate` / `tf-local-plan` / `tf-local-apply` / `tf-local-destroy` /
+  `compactor-test` targets exist in the Makefile already (contrary to the earlier note in
+  `tasks.md` saying none were added — that note is now stale).
+
+---
+
+## Phase 6 — Control plane, Debezium CDC, alert engine · 2026-10-19 · ✅ core complete
+
+Same situation as Phase 10: code, tests and specs (`specs/06-control-plane/`,
+`specs/06-alert-engine/`, ADR-0015, ADR-0016, ADR-0017) were already in the tree; this is the
+close-out — rerunning the proofs and pasting real output.
+
+**control-plane** — `./gradlew :services:control-plane:test :services:control-plane:integrationTest`,
+23 test classes, 102 tests, 0 failures / 0 skipped across the board (domain, `TenantHierarchy`
+cycle prevention, `DependencyGraph` Kahn sort, `AvroConfigChangeEncoder`, application services,
+controllers, `FlywayMigrationIT`, `OutboxAtomicityIT` incl. the two mutation checks (T6-11, T6-13),
+`TenantTreeQueryCountIT` / `AlertRuleQueryCountIT` (N+1 fixed to <=3 / <=1 queries),
+`TransactionBehaviourIT`, `ControlPlaneApiIT`, `ControlPlaneWiringTest`).
+
+**alert-engine** — `./gradlew :services:alert-engine:test :services:alert-engine:integrationTest`,
+30 test classes, 191 tests, 0 failures / 0 skipped (`RuleGraphValidator` cycle detection,
+`DependencyGraph` levels, threshold/rate-of-change/absence evaluators, `AlertStateMachine`,
+`RuleBook`, `AlertEngine` dedupe/resolve/refire/suppression (BFS across chains and diamonds),
+`AlertOutbox`/`AlertProcessor`, `AlertFeed` ordering/replay/overflow, hexagonal architecture rules,
+Kafka/SQS adapters, `AlertsApiContractTest`/SSE, `AlertEngineIT` against real Kafka 3.9.1 + moto).
+
+**CDC proven live** (T6-18), redone by hand against a fresh stack:
+
+```
+$ make up-cdc                                   # Kafka, Postgres, Kafka Connect/Debezium
+$ ./gradlew :services:control-plane:bootRun     # migrates control_plane schema, starts on :8085
+$ make register-outbox-connector                # POST outbox-connector.json -> Connect
+$ curl localhost:8088/connectors/control-plane-outbox/status
+{"connector":{"state":"RUNNING"},"tasks":[{"state":"RUNNING"}]}
+```
+
+Through the REST API: `POST /v1/admin/tenants` -> 201, `PUT /v1/admin/tenants/{id}` -> 200,
+`DELETE /v1/admin/tenants/{id}` -> 204. Consuming `config.changes.v1` from the start of the topic:
+
+```
+id:...,operation:CREATED,entityKind:TENANT   key=tenant/cdc-verify-tenant
+  value: <Avro envelope> {"entityKind":"TENANT","tenantId":"cdc-verify-tenant",
+         "displayName":"CDC Verify","monthlyEventQuota":1000,"parentTenantId":null,"version":0}
+id:...,operation:UPDATED,entityKind:TENANT   key=tenant/cdc-verify-tenant
+  value: <Avro envelope> {... "displayName":"CDC Verify Updated","monthlyEventQuota":2000,"version":1}
+id:...,operation:DELETED,entityKind:TENANT   key=tenant/cdc-verify-tenant
+  value: null   # tombstone
+```
+
+REST write -> Postgres outbox row -> Debezium -> `EventRouter` SMT -> Avro-wrapped JSON on
+`config.changes.v1`, with a tombstone on delete, confirmed end to end. (The topic also still held
+events from an earlier, unrelated session — `streamflix`, `late` — left untouched.)
+
+### Honest gaps (unchanged from the two `tasks.md` files)
+
+- Both modules' domain/service/adapter code was written alongside its tests in the same pass, so
+  the red-first step was not observed run by run; what *was* run and is in the test suite is the
+  mutation checks (control-plane: outbox-on-its-own-connection, tree-reader-without-fetch;
+  alert-engine: BFS suppression removed, idempotence guard removed — all verified red, then green).
+- Alert engine does not restore open alerts from `alerts.v1` on startup (T6B-18, cut; see
+  ADR-0017) — a restart currently starts from empty state.
+- `OutboxCdcIT` (Testcontainers + Debezium, as opposed to the compose-based proof above) is
+  marked "if it can be made to run" in `tasks.md`; not rerun here.
+- No authentication on either service's REST API. Single Postgres instance, no replication.
+
+---
+
+## Phase 7 — React dashboard · 2026-10-19 · ✅ core complete
+
+Same gap as phases 6/10/12/13: code and `specs/07-web/` (21/21 tasks ticked) were already in the
+tree, all in `eb230a3`, with no `MILESTONES.md` entry. Rerun fresh in this session:
+
+```
+$ npm run typecheck      # tsc --noEmit
+(clean, no output)
+
+$ npm run test           # vitest run
+Test Files  25 passed (25)
+     Tests  258 passed (258)
+
+$ npm run e2e            # build + Playwright, against mocked backends only
+17 passed (12.2s)
+```
+
+The e2e run needed `npx playwright install chromium` first — the browser binary was not present
+on this machine; once installed, all 17 specs passed, including the axe accessibility scan
+(`lists the tenant rules ... passes the accessibility scan`) and a keyboard-only navigation test.
+
+Covers: SSE client with reconnect/backoff and `Last-Event-ID` resume, live metrics chart, alert
+feed, rule-admin CRUD against control-plane/alert-engine contracts (with optimistic-concurrency
+and dependency-cycle 422 handling), OIDC/PKCE login flow, tenant switching.
+
+### Honest gaps (from `web/README.md`, unchanged)
+
+- Every test — unit and e2e — stubs `fetch`/the network. Nothing here has been run against the
+  real backends (query-api, control-plane, alert-engine) in this session or, per `web/README.md`,
+  any prior one.
+- The dev proxy to the real backends was checked once by hand, not retested here.
+- Keycloak login has never been exercised live; sign-in is off by default.
+
+---
+
+## Phase 12 — Activity feed · 2026-10-19 · ✅ core complete
+
+Same gap again: `specs/12-activity-feed/` and the service were already built in `eb230a3`.
+`tasks.md` shows only T12-01 ticked, but every other listed task maps to code and a passing test
+that already exists — rerun fresh in this session because the on-disk test results for one class
+(`WatchFeedIT`) were missing/ambiguous-by-timestamp:
+
+```
+$ ./gradlew :services:activity-feed:test :services:activity-feed:integrationTest
+BUILD SUCCESSFUL
+```
+
+23 test classes, **165 tests, 0 failures, 0 skipped** (domain: `UserId`, `FeedEntry`,
+`FanOutPolicy`, `Ranker`, `FeedMerger`, `FeedPager`, `CursorCodec`; architecture rules; application
+services (`FanOutService`, `FeedService`, `FollowService`, `WatchService`); Kafka adapters
+(`WatchEventDecoder`/`Listener`); three web controllers; `JdbcFollowGraphIT` — concurrent-follow
+and self-follow-rejection cases pass under real concurrency; `RedisTimelineStoreIT` — trim,
+dedup-by-event-id, snapshot-bounded reads; `FeedWiringTest`; `WatchFeedIT`).
+
+### Honest gaps (from `tasks.md`'s "Not built", unchanged)
+
+- No engagement counters, no auth, no rate limits, no inactive-user skipping.
+- No real producer of the watch signal — `WatchEvent` is synthetic in tests, nothing upstream
+  emits it yet.
+
+---
+
+## Phase 13 — MCP server / AI tooling · 2026-10-19 · ✅ core complete
+
+Same gap again: `specs/13-mcp/` (17/19 tasks ticked; the two open are this write-up and an
+explicitly-cut stretch goal) and the service were already built in `eb230a3`. Gradle reports the
+existing results as current (`UP-TO-DATE`, not rerun):
+
+```
+$ ./gradlew :services:mcp-server:test :services:mcp-server:integrationTest
+UP-TO-DATE
+```
+
+14 test classes, **87 tests, 0 failures, 0 skipped**, including `PromptInjectionTest`,
+`McpArchitectureRulesTest`, `McpProtocolIT`, `StdioProtocolIT`. This is the same server already
+registered as this session's `streampulse` MCP tools (`list_active_alerts`, `explain_alert`,
+`get_live_metrics`) — demonstrably live, not just compiled.
+
+### Honest gaps (from `tasks.md`, unchanged)
+
+- T13-19, an LLM incident summarizer, was cut and never built.
+
+---
+
+## Phase 9 · T9-02 — fault-injection harness (toxiproxy) · 2026-10-19 · 🚧 in progress
+
+Red first (no proxy running):
+
+```
+$ ./docker/toxiproxy/chaos-check.sh
+== toxiproxy API
+FAIL: toxiproxy API not reachable on :8474
+```
+
+After adding `toxiproxy` (`chaos` profile), a `CHAOS` Kafka listener and the Makefile targets:
+
+```
+$ make up-chaos && make chaos-check
+== toxiproxy API
+   kafka, postgres, redis defined
+== kafka advertises the proxy to clients that bootstrap through it
+   advertised: localhost:29092
+== kafka through the proxy
+   reachable
+   unreachable once disabled
+   recovered once re-enabled
+== postgres through the proxy
+   reachable
+   unreachable once disabled
+   recovered once re-enabled
+== redis through the proxy
+   reachable
+   unreachable once disabled
+   recovered once re-enabled
+PASS: all three proxies carry traffic and their faults bite
+```
+
+**Found by building it:** a plain TCP proxy in front of Kafka only intercepts the *bootstrap*
+call. The broker then hands clients its advertised address, and a long-lived client talks there
+directly. My first check used a fresh client per assertion, so it could not see that bypass. The
+fix is a dedicated `CHAOS` listener advertising `localhost:29092`, plus a check on the advertised
+address. Mutation, done through the toxiproxy API with no file edit:
+
+```
+$ curl -X POST localhost:8474/proxies/kafka -d '{"upstream":"kafka:19092"}'
+$ ./docker/toxiproxy/chaos-check.sh
+FAIL: broker advertises 'kafka:19092', not localhost:29092: clients would bypass the proxy
+```
+
+Restored to `kafka:29093` → green again. The normal path is unaffected: `kafka` healthy on
+`:9092`, `kafka-init` exit 0 with all five topics created over `:19092`.
+
+### Honest gaps
+
+- This proves the harness, not any service's behaviour. No service has been run through the
+  proxies yet; that is T9-30 onwards.
+- Only `enabled: false` (a hard partition) is exercised. Latency, bandwidth and timeout toxics are
+  not yet used by anything.

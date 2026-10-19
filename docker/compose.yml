@@ -59,9 +59,12 @@ services:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller        # KRaft: one node does both
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
-      KAFKA_LISTENERS: PLAINTEXT://:19092,CONTROLLER://:9093,PLAINTEXT_HOST://:9092
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:19092,PLAINTEXT_HOST://localhost:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      # CHAOS (Phase 9): a client bootstraps via the proxy, then connects to whatever address the
+      # broker ADVERTISES. Without a listener advertising the proxy's own port, clients bypass
+      # toxiproxy after the first metadata call and every injected Kafka fault does nothing.
+      KAFKA_LISTENERS: PLAINTEXT://:19092,CONTROLLER://:9093,PLAINTEXT_HOST://:9092,CHAOS://:29093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:19092,PLAINTEXT_HOST://localhost:9092,CHAOS://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,CHAOS:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       # Single broker ⇒ every replication factor must be 1, or topic creation fails.
@@ -302,6 +305,29 @@ services:
       timeout: 5s
       retries: 12
       start_period: 20s
+
+  # -------------------------------------------------------------------------
+  # TOXIPROXY — network fault injection for Phase 9 (latency, bandwidth caps, partitions).
+  # Services run on the host and reach a dependency through the proxy only when told to:
+  #   KAFKA_BOOTSTRAP=localhost:29092
+  #   POSTGRES_URL=jdbc:postgresql://localhost:25432/streampulse
+  #   REDIS_PORT=26379
+  # Default ports are untouched, so nothing else in the stack goes through the proxy.
+  # Proxies come from toxiproxy.json at boot; faults are added at run time on the API (:8474).
+  # Tag verified with `docker manifest inspect` (amd64, arm, arm64).
+  # -------------------------------------------------------------------------
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    profiles: [chaos]
+    container_name: sp-toxiproxy
+    command: ["-host=0.0.0.0", "-config=/config/toxiproxy.json"]
+    volumes:
+      - ./toxiproxy/toxiproxy.json:/config/toxiproxy.json:ro
+    ports:
+      - "8474:8474"      # control API
+      - "29092:29092"    # kafka
+      - "25432:25432"    # postgres
+      - "26379:26379"    # redis
 
 volumes:
   postgres-data:

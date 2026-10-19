@@ -33,7 +33,8 @@ owned by the integrator; literal output lives in the agent report).
 - A second `plan` is not empty against moto (tags on the stream and bucket are not returned; `redrive_policy` is re-serialised). Not fixed: it is emulator behaviour.
 - DynamoDB Local cannot be used with provider 6.68.0 (apply never returns); cause unproven.
 - Point-in-time recovery is untested (DynamoDB Local has no such API; the block is off locally).
-- No `make` targets were added (the Makefile is not mine); proposed text is in the Phase 10 report.
+- `make` targets exist (`tf-validate`, `tf-local-plan`, `tf-local-apply`, `tf-local-destroy`,
+  `compactor-test`) — added since this note was first written.
 - No service writes the raw archive or the aggregate-history table; those modules describe a target.
 - No deployment of the compactor as a real serverless function; it runs in-process and in tests only.
 - `msk`, `vpc`, `eks` have never been planned or applied.

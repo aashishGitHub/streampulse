@@ -27,5 +27,5 @@ registers two `List<SyncToolSpecification>` beans; and I first picked the wrong 
 - [x] T13-15 mutation (a): remove the tenant filter → isolation tests red; restore → green
 - [x] T13-16 mutation (b): remove the free-text cap → injection test red; restore → green
 - [x] T13-17 `.mcp.json`, `.claude/commands/{spec-new,spec-tasks,spec-verify}.md` (files written; `claude mcp get streampulse` parsed `.mcp.json` and reported "Pending approval"; the server was NOT connected from Claude Code itself)
-- [ ] T13-18 verified output into `MILESTONES.md` (left to the coordinator)
+- [x] T13-18 verified output into `MILESTONES.md` (2026-10-19 close-out)
 - [ ] T13-19 (not built) LLM incident summarizer

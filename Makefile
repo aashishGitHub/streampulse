@@ -203,6 +203,19 @@ web-dev: ## dashboard on http://localhost:5173, proxying to 8082/8085/8086
 	cd web && npm run dev
 
 # ---------------------------------------------------------------------------
+# Fault injection (Phase 9): toxiproxy in front of Kafka, Postgres and Redis
+# ---------------------------------------------------------------------------
+.PHONY: up-chaos chaos-check down-chaos
+up-chaos: ## Kafka, Postgres, Redis and toxiproxy (proxies on 29092 / 25432 / 26379, API on 8474)
+	$(COMPOSE) --profile core --profile chaos up -d kafka kafka-init postgres redis toxiproxy
+
+chaos-check: ## Prove each proxy carries traffic and that disabling it breaks that traffic
+	./docker/toxiproxy/chaos-check.sh
+
+down-chaos: ## Stop the chaos profile (keeps volumes)
+	$(COMPOSE) --profile core --profile chaos down
+
+# ---------------------------------------------------------------------------
 # Terraform and the archive compactor (Phase 10). Emulators only: ADR-0019.
 # ---------------------------------------------------------------------------
 TF_DIR := infra/terraform

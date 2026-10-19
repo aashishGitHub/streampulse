@@ -23,5 +23,5 @@ the mutation checks in ADR-0017's verification section: removing the BFS suppres
 - [x] T6B-14 `AlertEngineWiringTest`, `MicrometerAlertMetricsTest` → composition root, metrics
 - [x] T6B-15 `RuleBookLoaderIT`, `AlertEngineIT` (Kafka 3.9.1 + moto 5.2.2) → loader, Kafka and SQS channels
 - [x] T6B-16 mutation checks (BFS, idempotence) with red then green output
-- [ ] T6B-17 verified output into `MILESTONES.md` (left to the coordinator; this agent does not edit it)
+- [x] T6B-17 verified output into `MILESTONES.md` (2026-10-19 close-out)
 - [ ] T6B-18 restore open alerts from `alerts.v1` at start (not built; see ADR-0017)
