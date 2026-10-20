@@ -2047,3 +2047,72 @@ event-to-visible time adds up to a window (10 s) on top.
 - Both rates are far below the 40,000 events/s ingest handled alone in T9-11; the downstream
   stages' own limits are not found. Higher rates need the quota lifted, and I did not run them.
 - Loadgen, the reader and every service shared one machine.
+
+---
+
+## Phase 14 — Interview packaging · 2026-10-19 · ✅ pack written, not yet used in a live mock
+
+A senior Java backend / platform interview pack, one file per phase (0 to 13) at beginner, mid and senior
+depth, under `docs/interview/`. Spec: `specs/14-interview-packaging/`. No production code changed.
+
+```
+$ make interview-check
+python3 -I scripts/check-interview-pack.py
+checked 507 path references, 36 number rows: PASS
+```
+
+What exists: 14 phase files with 205 questions (each with the points a strong answer contains and a file to
+open), `01-the-story.md`, `05-what-broke.md` (11 stories, all from local runs), `06-numbers.md` (every quotable
+number labelled measured, target or assumption), `07-question-map.md` (maps the sibling `../Java/interview-qa`
+notes onto the phases), `08-mock-interviews.md` (four timed sets and a scoring guide), and a README with the
+beginner, mid, senior study ladder. Phase 5 is the thinnest (3, 4 and 3 questions); phases 0, 1, 2 have 6, 6, 6.
+
+The checker was red first (`FAIL: docs/interview does not exist`), then proven by mutation: a bogus path, a
+measured number citing a heading that does not exist, an unknown number kind, and a `MISSING:` claim about a
+file that exists each made it fail, naming file and line. All were restored.
+
+```
+error: phases/phase-05-query-api.md:141: path does not exist: services/query-api/src/main/java/com/streampulse/query/DoesNotExist.java
+error: phases/phase-05-query-api.md:141: claimed missing but it now exists: docs/script.md
+error: 06-numbers.md:35: measured value needs `MILESTONES: <heading text>` that matches a MILESTONES.md heading; got ...
+error: 06-numbers.md:36: kind must be one of ('measured', 'target', 'assumption'), got 'guess'
+```
+
+The checker also caught one of my own mistakes during writing: a test path I had guessed
+(`.../ingest/IngestEndToEndIT.java`; the real one is under `.../ingest/adapter/`).
+
+**Older docs corrected.** A read-only audit found about 60 stale statements in `docs/script.md` and
+`docs/deep-dive.md` (for example "no outbox", "no alert rules", "processor crash not demonstrated", "OpenAPI
+still says saturation is 429", "no Phase 3 Day 2 entries"). Two agents applied the audit rows; I reviewed both
+diffs. `script.md`: 37 insertions, 29 deletions; `deep-dive.md`: 66 insertions, 45 deletions. One unsourced
+claim about a real company's stack was removed. After editing, every repo path named in both documents resolves
+except `docs/runbook.md` and `docs/system-health.md`, which the text now says are missing. I fixed one more stale
+line the script agent flagged (the raw-archive item); the other flagged line (topic partition counts) is still true.
+
+**Found while building it (the pack is evidence of these, not just a write-up):**
+- ADR-0005 and ADR-0004 describe a schema registry that was never built; the codec's own Javadoc says writer and
+  reader schema are the same class. The pack tells this as a senior story.
+- `max-batch-size` is declared in the ingest properties and never read; oversize batches return 400, not the
+  413 the spec says.
+- The ingest quota limiter reuses the idempotency fail-open flag and TTL, so during a Redis outage no tenant
+  limit applies. Both claims were confirmed in the code before being written down.
+- The README architecture diagram shows an S3 raw archive writer, a DynamoDB history writer and "every service
+  refreshes its caches"; none exists (only the alert engine reads `config.changes.v1`). A note was added under
+  the diagram.
+- `docs/runbook.md`, `docs/system-health.md` and ADR-0023 are referenced by existing files and do not exist.
+
+### Honest gaps
+
+- **The check proves paths and number sources, not that an answer is right.** Every claim was taken from code,
+  ADRs or `MILESTONES.md` through read-only fact sheets and the sharper ones were re-checked by hand, but nobody
+  independent has reviewed the answers.
+- **Not used yet.** The mock interviews have not been run with a person. The scoring guide is untested.
+- **Phase 7 was written from `web/README.md`, ADR-0018 and the task list, not from a fact sheet.** The research
+  agent for it was stopped before finishing. One question (token storage and XSS) says to check `oidcAuth.ts`
+  before answering, because I did not read where the token is stored.
+- **Several items are marked VERIFY in the pack and not resolved:** the Gradle `RepositoriesMode.PREFER_SETTINGS`
+  semantics, whether the configuration cache is on, the order of shutdown phases in the ingest drain (javadoc
+  and code disagree), whether GitHub Actions has ever run, whether `max.task.idle.ms` is relevant to the crash
+  defect, and whether apps are announced through the outbox.
+- `RESUME-HERE.md` is stale (as of 2026-10-12) and was not edited. Kubernetes content in the pack is design
+  thinking, labelled as such; nothing there is experience from this repo.

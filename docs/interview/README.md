@@ -4,7 +4,8 @@ Prepares for a **senior Java backend / platform** interview, using this reposito
 Every answer points at a file you can open. Every number says whether it was measured.
 
 Written 2026-10-19 against the code at that date. `scripts/check-interview-pack.py` (run
-`make interview-check`) fails if a path in this pack stops existing or a number loses its source.
+`make interview-check`) fails if a path or a `path:line` reference stops existing, a code example no longer
+matches the file it quotes, an answer is not a paragraph of sentences, or a number loses its source.
 
 ## The three rules
 
@@ -28,11 +29,17 @@ Written 2026-10-19 against the code at that date. `scripts/check-interview-pack.
 ## The phases
 
 Each phase file has the same shape: status, code map, then **Beginner (B), Mid (M), Senior (S)**
-questions, each with the points a strong answer contains and the file to open, then "say this honestly".
+questions, then "say this honestly". Every question is laid out the same way:
+
+- **Answer:** a model answer in complete sentences that you can read, then say in your own words.
+- **Example:** a short snippet of real code with its `path:first-last` lines. `make interview-check` fails if
+  the snippet does not match those lines, so the code on the page is always the code in the repository.
+- **Code:** the files and line numbers to open.
+- **If they push:** the likely follow-up question and a sentence-length answer.
 
 | Phase | File | What is true about it |
 |---|---|---|
-| 0 Foundation | [phase-00](phases/phase-00-foundation.md) | built; CI never seen running |
+| 0 Foundation | [phase-00](phases/phase-00-foundation.md) | built; **CI runs on GitHub and has failed on every run** (a platform-dependent test, story 12) |
 | 1 Contracts | [phase-01](phases/phase-01-contracts.md) | built; **no schema registry** despite two notes saying one was coming |
 | 2 Ingest gateway | [phase-02](phases/phase-02-ingest-gateway.md) | built and measured on one machine |
 | 3 Stream processing | [phase-03](phases/phase-03-stream-processing.md) | built; **crash test fails**, unfixed |
